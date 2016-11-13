@@ -189,6 +189,11 @@ figure {
     text-transform:uppercase;
     font:normal 18px/24px arial, helvetica;
 }
+.content article h3 {
+    margin-top:20px;
+    text-transform:uppercase;
+    font:bold 14px/20px arial, helvetica;
+}
 .content article h1 span {
     float:right;
     font-weight:normal;
