@@ -1,0 +1,464 @@
+/* ==========================================================================
+   HTML5 Boilerplate styles - h5bp.com (generated via initializr.com)
+   ==========================================================================
+   Jetz Alipalo Professional Resume
+   Version 1
+   Author: Jetz Alipalo
+   ========================================================================== */
+
+html,
+button,
+input,
+select,
+textarea {
+    color: #222;
+}
+
+body {
+    font-size: 1em;
+    line-height: 1.4;
+}
+
+::-moz-selection {
+    background: #b3d4fc;
+    text-shadow: none;
+}
+
+::selection {
+    background: #b3d4fc;
+    text-shadow: none;
+}
+
+hr {
+    display: block;
+    height: 1px;
+    border: 0;
+    border-top: 1px solid #ccc;
+    margin: 1em 0;
+    padding: 0;
+}
+
+img {
+    vertical-align: middle;
+}
+
+fieldset {
+    border: 0;
+    margin: 0;
+    padding: 0;
+}
+
+textarea {
+    resize: vertical;
+}
+
+.chromeframe {
+    margin: 0.2em 0;
+    background: #ccc;
+    color: #000;
+    padding: 0.2em 0;
+}
+
+
+/* ==========================================================================
+   Resume Styles
+   ========================================================================== */
+body {
+    color:#707070;
+    font-family:arial, helvetica;
+}
+h1 {
+    font:bold 14px/24px arial, helvetica;
+    color:#585858;
+}
+p {
+    font:normal 12px/18px arial, helvetica;
+}
+a {
+    color:#606ffe;
+    outline: 0;
+    text-decoration:none;
+
+    -webkit-transition: color 0.3s ease-in-out;
+       -moz-transition: color 0.3s ease-in-out;
+         -o-transition: color 0.3s ease-in-out;
+            transition: color 0.3s ease-in-out;
+}
+a:hover {
+    color:#3b48ca;
+}
+
+
+.container {
+    width:960px;
+    margin:0 auto;
+}
+.main-left {
+    width:320px;
+    float:left;
+    text-align:right;
+}
+.main-right {
+    width:620px;
+    float:right;
+}
+
+
+header {
+    background:#f9f9f9;
+    border:1px solid #e0e0e0;
+    padding-bottom:20px;
+    position:relative;
+    z-index:99;
+}
+header article {
+    margin-left:15px;
+}
+.name {
+    font:normal 28px/28px arial, helvetica;
+    border-bottom:1px solid #d3d3d3;
+    padding-bottom:15px;
+    margin:44px 0 0;
+}
+header h2 {
+    font:normal 20px/32px arial, helvetica;
+    margin:44px 0 10px 0;
+}
+.objective {
+    font-size:14px;
+    line-height:26px;
+}
+
+main .jsMainLeft {
+    position:fixed;
+}
+figure {
+    margin-top:-95px;
+    float:right;
+    padding:5px;
+    background:#f9f9f9;
+    border:1px solid #e0e0e0;
+}
+.main-nav {
+    list-style:none;
+    margin:25px 0 0;
+    padding:0;
+}
+.main-nav li.active a,
+.main-nav li a:hover {
+    color:#000;
+    text-decoration:underline;
+}
+.main-nav li a {
+    font:normal 14px/24px arial, helvetica;
+    color:#585858;
+}
+
+
+/* Content */
+.content p {
+    font:normal 14px/26px arial, helvetica;
+    color:#707070;
+}
+
+.sec-lbl {
+    background:#000 url(../img/label-bg.png) right center no-repeat;
+    height:30px;
+
+    padding:0 90px 0 10px;
+    display:inline-block;
+    font:normal 16px/30px arial, helvetica;
+    color:#fff;
+    text-transform:uppercase;
+}
+
+.content > section {
+    margin-top:25px;
+    margin-bottom:35px;
+}
+.content article {
+    margin-left:15px;
+}
+.content article h1 {
+    border-bottom:1px solid #bababa;
+    margin-top:28px;
+    text-transform:uppercase;
+}
+.content article h2 {
+    margin-top:20px;
+    text-transform:uppercase;
+    font:normal 18px/24px arial, helvetica;
+}
+.content article h1 span {
+    float:right;
+    font-weight:normal;
+}
+
+.content ul li {
+    font:normal 14px/26px arial, helvetica;
+    color:#707070;
+}
+.content ul {
+    list-style:none;
+    padding:0;
+    margin:0;
+}
+.content ul li {
+    background:url(../img/list-style.jpg) left 9px no-repeat;
+    padding-left:15px;
+}
+.content ul li ul {
+    background:none;
+    list-style:circle;
+}
+.content ul li ul li {
+    background:none;
+    padding:0;
+    margin-left:15px;
+}
+.content ul.list-none  li {
+    background:none;
+    padding:0;
+}
+ul.col-2 {
+    padding:0;
+}
+.col-2 li {
+    width:42%;
+    float:left;
+}
+.lt-ie8 .col-2 li {
+    width:40%;
+}
+ul.apps {
+    margin-top:20px
+}
+ul.apps li {
+    line-height:32px;
+    font-size:16px;
+    margin-bottom:20px;
+}
+ul.apps li i {
+    margin-right:10px;
+}
+.comp-link {
+    color: #585858;
+}
+.comp-link:hover {
+    color: #606ffe;
+}
+
+/* Application Sprites */
+.app {
+    background:url(../img/apps.jpg) no-repeat;
+    width:32px;
+    height:32px;
+    float:left;
+}
+.vs2012 { background-position:-6px -9px; }
+.tort { background-position:-6px -220px; }
+.ps { background-position:-6px -61px; }
+.github { background-position:-6px -272px; }
+.dw { background-position:-6px -113px; }
+.iis { background-position:-6px -324px; }
+.cdx6 { background-position:-6px -165px; }
+.firebug { background-position:-6px -376px; }
+.jira { background-position:-6px -416px; }
+.sublime { background-position:-6px -456px; }
+.storm { background-position:-8px -494px; }
+.chromDev { background-position:-8px -535px; }
+
+
+.browser {
+    width:510px;
+    height:64px;
+    background:url(../img/browser-support.jpg) no-repeat;
+    margin:20px 0;
+}
+.browser ul {
+    visibility:hidden;
+}
+
+footer {
+    background:#e8e8e8;
+    border-top:1px solid #bcbcbc;
+    height:50px;
+
+    font:normal 12px/50px arial;
+    color:#666;
+    text-align:center;
+}
+
+
+
+
+
+/* ==========================================================================
+   Media Queries
+   ========================================================================== */
+
+@media only screen and (min-width: 35em) {
+
+}
+
+@media print,
+       (-o-min-device-pixel-ratio: 5/4),
+       (-webkit-min-device-pixel-ratio: 1.25),
+       (min-resolution: 120dpi) {
+
+}
+
+/* ==========================================================================
+   Helper classes
+   ========================================================================== */
+
+.ir {
+    background-color: transparent;
+    border: 0;
+    overflow: hidden;
+    *text-indent: -9999px;
+}
+
+.ir:before {
+    content: "";
+    display: block;
+    width: 0;
+    height: 150%;
+}
+
+.hidden {
+    display: none !important;
+    visibility: hidden;
+}
+
+.visuallyhidden {
+    border: 0;
+    clip: rect(0 0 0 0);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    width: 1px;
+}
+
+.visuallyhidden.focusable:active,
+.visuallyhidden.focusable:focus {
+    clip: auto;
+    height: auto;
+    margin: 0;
+    overflow: visible;
+    position: static;
+    width: auto;
+}
+
+.invisible {
+    visibility: hidden;
+}
+
+.clearfix:before,
+.clearfix:after {
+    content: " ";
+    display: table;
+}
+
+.clearfix:after {
+    clear: both;
+}
+
+.clearfix {
+    *zoom: 1;
+}
+
+/* ==========================================================================
+   Print styles
+   ========================================================================== */
+
+@media print {
+    * {
+        color: #000 !important; /* Black prints faster: h5bp.com/s */
+        box-shadow: none !important;
+        text-shadow: none !important;
+    }
+
+    a,
+    a:visited {
+        text-decoration: underline;
+    }
+
+    abbr[title]:after {
+        content: " (" attr(title) ")";
+    }
+
+    /*
+     * Don't show links for images, or javascript/internal links
+     */
+
+    .ir a:after,
+    a[href^="javascript:"]:after,
+    a[href^="#"]:after {
+        content: "";
+    }
+
+    pre,
+    blockquote {
+        border: 1px solid #999;
+        page-break-inside: avoid;
+    }
+
+    thead {
+        display: table-header-group; /* h5bp.com/t */
+    }
+
+    tr,
+    img {
+        page-break-inside: avoid;
+    }
+
+    img {
+        max-width: 100% !important;
+    }
+    .jsMainLeft {
+        display: none;
+    }
+
+    #top .container {
+        padding:5px 20px;
+    }
+    .browser {
+        display:none !important;
+    }
+
+    section .main-right {
+        width:840px;
+    }
+    ul.apps li {
+        margin-bottom:0;
+        padding-left: 0;
+    }
+    ul.apps li i {
+        display: none;
+    }
+    .sec-lbl {
+        border:1px solid #000;
+        display: block;
+    }
+
+    @page {
+        margin: 0.5cm;
+    }
+
+    p,
+    h2,
+    h3 {
+        orphans: 3;
+        widows: 3;
+    }
+
+    h2,
+    h3 {
+        page-break-after: avoid;
+    }
+
+
+}
