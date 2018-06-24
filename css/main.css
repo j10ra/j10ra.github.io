@@ -162,14 +162,29 @@ figure {
 }
 
 .sec-lbl {
-    background:#000 url(../img/label-bg.png) right center no-repeat;
+    position: relative;
+    background:#000;
     height:30px;
 
-    padding:0 90px 0 10px;
-    display:inline-block;
+    padding:4px 50px 0 10px;
+    display: inline-block;
     font:normal 16px/30px arial, helvetica;
     color:#fff;
     text-transform:uppercase;
+}
+
+.sec-lbl:after {
+    position: absolute;
+    content: '';
+    top: 0;
+    bottom: 0;
+    right: -34px;
+    width: 40px;
+    height: 100%;
+    width: 0;
+    height: 0;
+    border-top: 34px solid #000;
+    border-right: 34px solid transparent;
 }
 
 .content > section {
@@ -261,7 +276,7 @@ ul.apps li i {
     float:left;
 }
 .vs2012 { background-position:-6px -9px; }
-.tort { background-position:-6px -220px; }
+.vsts { background-position:-6px -220px; }
 .ps { background-position:-6px -61px; }
 .github { background-position:-6px -272px; }
 .dw { background-position:-6px -113px; }
@@ -269,7 +284,7 @@ ul.apps li i {
 .cdx6 { background-position:-6px -165px; }
 .firebug { background-position:-6px -376px; }
 .jira { background-position:-6px -416px; }
-.sublime { background-position:-6px -456px; }
+.azure { background-position:-6px -456px; }
 .storm { background-position:-8px -494px; }
 .chromDev { background-position:-8px -535px; }
 
@@ -277,7 +292,7 @@ ul.apps li i {
 .browser {
     width:510px;
     height:64px;
-    background:url(../img/browser-support.jpg) no-repeat;
+    background:url(../img/techs.png) no-repeat;
     margin:20px 0;
 }
 .browser ul {
