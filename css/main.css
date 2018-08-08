@@ -376,6 +376,10 @@ footer {
     visibility: hidden;
 }
 
+.indent, ul.indent {
+    margin-left: 20px;
+}
+
 .clearfix:before,
 .clearfix:after {
     content: " ";
