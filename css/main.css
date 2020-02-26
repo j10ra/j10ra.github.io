@@ -288,6 +288,10 @@ ul.apps li i {
 .storm { background-position:-8px -494px; }
 .chromDev { background-position:-8px -535px; }
 
+.vscode { background-position:-8px -685px; }
+.gulp { background-position:-6px -634px; }
+.webpack { background-position:-8px -578px; }
+
 
 .browser {
     width:510px;
