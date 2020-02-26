@@ -35,8 +35,6 @@ $(function () {
 
 
     $(window).scroll(function () {
-        console.log('scroll');
-
         $('.content > section').each(function () {
             var section = $(this);
 
@@ -57,11 +55,5 @@ $(function () {
 
         $('a[href="#' + ahref + '"]').parent('li').addClass('active')
     },1);
-    
+
 });
-
-
-
-
-
-
