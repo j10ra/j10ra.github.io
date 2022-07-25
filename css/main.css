@@ -400,9 +400,10 @@ footer {
     *zoom: 1;
 }
 
-.charp {
+.csharp {
     display: flex;
     align-items: center;
+    margin-left: -15px;
 }
 
 /* ==========================================================================
