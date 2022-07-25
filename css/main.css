@@ -539,3 +539,8 @@ footer {
     }
 
 }
+
+.charp {
+    display: flex;
+    align-items: center;
+}
