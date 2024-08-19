@@ -230,11 +230,13 @@ figure {
 .content ul li ul {
     background:none;
     list-style:circle;
+    margin: 10px 0;
 }
 .content ul li ul li {
     background:none;
     padding:0;
     margin-left:15px;
+    margin-top:5px;
 }
 .content ul.list-none  li {
     background:none;
