@@ -1,0 +1,17 @@
+/* SITE */
+Domain: jalipalo.dev
+Type: Personal portfolio · Curriculum vitae
+Owner: Jetz Alipalo
+Location: Wellington, New Zealand
+
+/* TEAM */
+Software engineer: Jetz Alipalo
+Site: https://jalipalo.dev
+GitHub: https://github.com/j10ra
+LinkedIn: https://www.linkedin.com/in/jetzalipalo/
+
+/* TECHNOLOGY */
+React, TypeScript, Vite, R3F (three.js), CSS, GitHub Pages, Cloudflare DNS
+
+/* THANKS */
+Built with care.

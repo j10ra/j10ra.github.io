@@ -17,6 +17,16 @@
     />
     <link rel="canonical" href="https://jalipalo.dev/" />
 
+    <!-- Categorization signals for URL filters / web gateways -->
+    <meta name="author" content="Jetz Alipalo" />
+    <meta name="rating" content="general" />
+    <meta
+      name="classification"
+      content="Personal Portfolio · Curriculum Vitae · Software Engineer"
+    />
+    <meta name="category" content="Personal Pages, Resume, Portfolio" />
+    <meta name="robots" content="index, follow" />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
     <link rel="alternate icon" type="image/x-icon" href="/favicon.ico?v=2" />
     <link rel="apple-touch-icon" href="/favicon.svg?v=2" />
@@ -56,6 +66,57 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap"
     />
+
+    <!-- Schema.org Person — helps automated classifiers identify this as a personal site -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Person",
+        "name": "Jetz Alipalo",
+        "alternateName": "j10ra",
+        "url": "https://jalipalo.dev/",
+        "jobTitle": "Software Engineer",
+        "description": "Software engineer with sixteen years across finance, logistics, and marketing. Builds with AI agents, custom MCP servers, and local-first React.",
+        "address": {
+          "@type": "PostalAddress",
+          "addressLocality": "Wellington",
+          "addressRegion": "Wellington",
+          "addressCountry": "NZ"
+        },
+        "knowsAbout": [
+          "Software Engineering",
+          "React",
+          "TypeScript",
+          "Local-first systems",
+          "RAG",
+          "MCP",
+          "Coding agents",
+          "Web development"
+        ],
+        "sameAs": [
+          "https://github.com/j10ra",
+          "https://www.linkedin.com/in/jetzalipalo/",
+          "https://www.upwork.com/freelancers/jalipalo"
+        ]
+      }
+    </script>
+
+    <!-- Schema.org WebSite -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Jetz Alipalo — Software Engineer",
+        "alternateName": "jalipalo.dev",
+        "url": "https://jalipalo.dev/",
+        "description": "Personal portfolio and curriculum vitae of Jetz Alipalo, software engineer.",
+        "inLanguage": "en-NZ",
+        "author": {
+          "@type": "Person",
+          "name": "Jetz Alipalo"
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
