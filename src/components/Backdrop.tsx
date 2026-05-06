@@ -20,11 +20,10 @@ function usePrefersReducedMotion(): boolean {
 const COLOR_BASE = new THREE.Color("#5d4730");
 const COLOR_PULSE = new THREE.Color("#f5d8a8");
 
-const NODE_COUNT = 56;
-const VOL_X = 16;
+const NODE_COUNT = 40;
 const VOL_Y = 5.5;
 const NEIGHBORS_PER_NODE = 3;
-const DRIFT_RADIUS = 0.35;
+const DRIFT_RADIUS = 0.4;
 
 type Node = {
   base: THREE.Vector3;
@@ -55,15 +54,21 @@ function buildNetwork() {
   const rand = rng(31);
   const nodes: Node[] = [];
 
-  // distribute nodes with slight grid bias to avoid pure-random galaxy look
-  const cols = 12;
+  // Nodes live in the right half of the viewport. No hard mask — drift can
+  // float them slightly outside, but base positions are bounded right-side.
+  const cols = 8;
   const rows = Math.ceil(NODE_COUNT / cols);
+  const X_LEFT = 0;
+  const X_RIGHT = 7.5;
+  const RIGHT_BIAS = 1.2; // mild density bump toward the right edge
   for (let i = 0; i < NODE_COUNT; i++) {
     const cx = i % cols;
     const ry = Math.floor(i / cols);
-    const cellX = (cx / (cols - 1) - 0.5) * VOL_X;
+    const tx = cx / Math.max(1, cols - 1);
+    const biasedX = Math.pow(tx, RIGHT_BIAS);
+    const cellX = X_LEFT + biasedX * (X_RIGHT - X_LEFT);
     const cellY = (ry / Math.max(1, rows - 1) - 0.5) * VOL_Y;
-    const jitterX = (rand() - 0.5) * (VOL_X / cols) * 0.9;
+    const jitterX = (rand() - 0.5) * ((X_RIGHT - X_LEFT) / cols) * 0.85;
     const jitterY = (rand() - 0.5) * (VOL_Y / rows) * 0.9;
     const base = new THREE.Vector3(cellX + jitterX, cellY + jitterY, 0);
     nodes.push({

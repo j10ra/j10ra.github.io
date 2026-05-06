@@ -23,8 +23,8 @@ export type SkillGroup = {
 
 export const profile = {
   name: "Jetz Alipalo",
-  role: "Senior Software Engineer",
-  location: "Auckland, New Zealand",
+  role: "Software Engineer",
+  location: "Wellington, New Zealand",
   email: "jalipalo@gmail.com",
   phone: "+64 21 024 55215",
   github: "j10ra",
@@ -233,6 +233,7 @@ export const skills: SkillGroup[] = [
 export const aiStack: SkillGroup = {
   label: "AI · agent stack",
   items: [
+    "Frontier model access",
     "Coding agents",
     "MCP (custom servers)",
     "Agent skills / subagents",
@@ -257,8 +258,33 @@ export type Project = {
 
 export const building: Project[] = [
   {
+    name: "AskAnna",
+    status: "Live · production",
+    href: "https://www.askanna.com.au/",
+    blurb:
+      "Production AI assistant for ASX market intelligence. Built as part of the AskAnna engineering team — React frontend, Encore TypeScript services, WebSocket-driven real-time notifications, and the RAG pipeline that ingests, chunks, and embeds ASX publications so the LLM answers from live source data, not training-time knowledge.",
+    tags: [
+      "React",
+      "TypeScript",
+      "Encore",
+      "WebSockets",
+      "Supabase",
+      "pgvector",
+      "RAG",
+      "Embeddings",
+      "Stripe",
+    ],
+  },
+  {
+    name: "Internal MCP suites",
+    status: "Internal · production",
+    blurb:
+      "Domain-specific coding-agent skill suites and MCP servers built for the day job. Encode SQL, log triage, EDI debugging, and reporting workflows across multiple internal tools so investigation becomes a single agent call.",
+    tags: ["MCP", "Coding agents", "Skills", "Workflow"],
+  },
+  {
     name: "mneme",
-    status: "Open source soon",
+    status: "Soon · open source",
     blurb:
       "Cross-machine memory store for AI coding assistants. Pluggable LLM and embedder backends behind tiny interfaces, hybrid recall (semantic + keyword + recency), self-hosted on a private inference VM.",
     tags: [
@@ -272,17 +298,11 @@ export const building: Project[] = [
   },
   {
     name: "lens-engine",
-    status: "Personal infra",
+    status: "Live · open source",
+    href: "https://lens-engine.com/",
     blurb:
       "Self-hosted platform for AI tooling experiments — inference, embedding, tunnels, and the substrate that mneme and a handful of other projects run on.",
     tags: ["Self-hosted", "Tunnels", "Inference VM", "GPU"],
-  },
-  {
-    name: "Internal MCP suite",
-    status: "Production · internal",
-    blurb:
-      "Domain-specific coding-agent skills and MCP servers built for the day job. Encode SQL, log triage, EDI debugging, and reporting workflows so investigation becomes a single agent call.",
-    tags: ["MCP", "Coding agents", "Skills", "Workflow"],
   },
 ];
 

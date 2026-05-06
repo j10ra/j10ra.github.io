@@ -15,9 +15,9 @@ export function Skills() {
         </ul>
         <p className="prose">
           Built and maintain custom MCP servers and coding-agent skill suites
-          that fold multi-step investigation work into single agent calls. The
-          full kit is always within reach — terminal, IDE, and a self-hosted
-          inference VM behind it all.
+          that fold multi-step investigation work into single agent calls.
+          Fully self-equipped — frontier model subscriptions, custom toolkit,
+          and a self-hosted inference VM. The kit travels with me.
         </p>
       </div>
 

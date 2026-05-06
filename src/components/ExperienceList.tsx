@@ -1,5 +1,7 @@
 import { Fragment } from "react";
-import { experience, type Role } from "../data/resume";
+import { experience, profile, type Role } from "../data/resume";
+import { Education } from "./Education";
+import { Awards } from "./Awards";
 
 const PRIMARY_COUNT = 3;
 
@@ -90,22 +92,45 @@ export function ExperienceList() {
       ))}
 
       {earlier.length > 0 ? (
-        <details className="earlier-roles">
-          <summary>
-            <span className="earlier-label">Where it started</span>
-            <span className="earlier-period muted">
-              From 2006 · {earlier.length} earlier roles, design through code
-            </span>
-            <span className="summary-icon" aria-hidden="true">+</span>
-          </summary>
-          <div className="earlier-body">
-            {earlier.map((role, i) => (
-              <Fragment key={i}>
-                <Entry role={role} />
-              </Fragment>
-            ))}
+        <div className="bottom-strip">
+          <details className="earlier-roles">
+            <summary>
+              <span className="earlier-label">Where it started</span>
+              <span className="earlier-period muted">
+                From 2006 · earlier roles, education, recognition
+              </span>
+              <span className="summary-icon" aria-hidden="true">+</span>
+            </summary>
+            <div className="earlier-body">
+              {earlier.map((role, i) => (
+                <Fragment key={i}>
+                  <Entry role={role} />
+                </Fragment>
+              ))}
+
+              <section className="earlier-aside" id="education">
+                <p className="earlier-aside-label">Education</p>
+                <Education />
+              </section>
+
+              <section className="earlier-aside" id="recognition">
+                <p className="earlier-aside-label">Recognition</p>
+                <Awards />
+              </section>
+            </div>
+          </details>
+
+          <div className="collapsed-end">
+            © {new Date().getFullYear()} · {profile.name}
           </div>
-        </details>
+
+          <div className="bottom-end">
+            <span>
+              © {new Date().getFullYear()} · {profile.name}
+            </span>
+            <a href="#top">Back to top ↑</a>
+          </div>
+        </div>
       ) : null}
     </div>
   );

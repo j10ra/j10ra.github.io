@@ -8,7 +8,7 @@ export function Building() {
       <article className="project project--featured">
         <header className="project-head">
           <div>
-            <p className="project-kicker">Open source soon · personal</p>
+            <p className="project-kicker">Featured project</p>
             <h3 className="project-name">
               {featured.href ? (
                 <a href={featured.href} target="_blank" rel="noreferrer">

@@ -1,12 +1,10 @@
+import { useEffect } from "react";
 import { Topbar } from "./components/Topbar";
 import { Hero } from "./components/Hero";
 import { Building } from "./components/Building";
 import { Activity } from "./components/Activity";
 import { ExperienceList } from "./components/ExperienceList";
 import { Skills } from "./components/Skills";
-import { Education } from "./components/Education";
-import { Awards } from "./components/Awards";
-import { Footer } from "./components/Footer";
 
 function SectionHead({
   num,
@@ -38,6 +36,25 @@ function SectionHead({
 }
 
 export function App() {
+  // If someone deep-links to #education or #recognition (now nested inside
+  // the experience > "where it started" fold), open the details and scroll.
+  useEffect(() => {
+    const sync = () => {
+      const hash = window.location.hash.slice(1);
+      if (hash === "education" || hash === "recognition") {
+        document
+          .querySelectorAll<HTMLDetailsElement>(".earlier-roles")
+          .forEach((d) => (d.open = true));
+        requestAnimationFrame(() => {
+          document.getElementById(hash)?.scrollIntoView({ behavior: "smooth" });
+        });
+      }
+    };
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
   return (
     <>
       <a className="skip-link" href="#content">
@@ -55,8 +72,8 @@ export function App() {
           <div className="shell">
             <SectionHead
               num="01"
-              kicker="Side projects · agent tooling"
-              title="Currently building"
+              kicker="Shipped products · side projects · agent tooling"
+              title="Recent work"
               id="building"
             />
             <Building />
@@ -75,10 +92,22 @@ export function App() {
           </div>
         </section>
 
-        <section className="section" id="experience">
+        <section className="section" id="expertise">
           <div className="shell">
             <SectionHead
               num="03"
+              kicker="What I work with"
+              title="Expertise"
+              id="expertise"
+            />
+            <Skills />
+          </div>
+        </section>
+
+        <section className="section" id="experience">
+          <div className="shell">
+            <SectionHead
+              num="04"
               kicker="Work history"
               title="Experience"
               meta="2008 — Present"
@@ -88,45 +117,6 @@ export function App() {
           </div>
         </section>
 
-        <section className="section" id="expertise">
-          <div className="shell">
-            <SectionHead
-              num="04"
-              kicker="What I work with"
-              title="Expertise"
-              id="expertise"
-            />
-            <Skills />
-          </div>
-        </section>
-
-        <section className="section" id="education">
-          <div className="shell">
-            <SectionHead
-              num="05"
-              kicker="Background"
-              title="Education"
-              id="education"
-            />
-            <Education />
-          </div>
-        </section>
-
-        <section className="section" id="recognition">
-          <div className="shell">
-            <SectionHead
-              num="06"
-              kicker="Selected awards"
-              title="Recognition"
-              id="recognition"
-            />
-            <Awards />
-          </div>
-        </section>
-
-        <div className="shell">
-          <Footer />
-        </div>
       </main>
     </>
   );
