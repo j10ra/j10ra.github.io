@@ -35,7 +35,7 @@ export const profile = {
   ],
   tagline: "Building production web platforms since 2008.",
   lede:
-    "Senior engineer with sixteen years across finance, logistics, and marketing. Currently leaning hard into AI-augmented engineering — local-first React, sync architecture, custom MCP servers, and coding-agent skill suites that collapse multi-hour work into minutes.",
+    "Senior engineer with sixteen years across finance, logistics, and marketing. AI-augmented engineering — local-first React, sync architecture, custom MCP servers, and coding-agent skill suites that collapse multi-hour work into minutes.",
 };
 
 export const stats: Array<{ value: string; label: string }> = [
@@ -246,7 +246,7 @@ export const aiStack: SkillGroup = {
 };
 
 export const practice =
-  "Local-first architecture and offline-capable apps. RESTful and GraphQL APIs. Modular, reusable component systems. Accessibility (WCAG AA), semantic HTML, SEO. Performance budgets and progressive enhancement. Heavy day-to-day use of LLMs and custom agent tooling — built and maintain MCP servers and skill suites that turn repetitive investigation work into single-call workflows.";
+  "Comfortable across the stack — framework internals, sync engines, and data layers, not just the happy path. Local-first, sync-capable architectures with offline as a default. Component systems designed for reuse across teams and stacks. Custom MCP servers and agent skill suites amplify the work; they don't replace the engineering judgement underneath.";
 
 export type Project = {
   name: string;
