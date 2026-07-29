@@ -7,6 +7,8 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ExtensionContext } from "@qube-code/extension-sdk";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   addSource,
   createRoutine,
@@ -42,10 +44,14 @@ import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js"
 import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
 import { registerMailarrRoutes } from "../routes.js";
 import mailarr, {
-  editorRoutineId,
-  openPipelineEditor,
+  BriefingMarkdown,
+  briefingSummary,
+  createMemoryStore,
+  openRoutineWorkbench,
   pendingAge,
+  routineIdFromWorkbenchKey,
   serializeKeywordWeights,
+  workbenchTarget,
 } from "../web/index.js";
 
 const BASE_ROUTINE: RoutineInput = {
@@ -62,7 +68,7 @@ const BASE_ROUTINE: RoutineInput = {
   scoreFloor: null,
 };
 
-test("fresh schema is version 1 and seeds disabled routine data with permanent history", () => {
+test("fresh schema is version 2 and seeds disabled routine data with permanent history", () => {
   withDatabase((db) => {
     const version = db.prepare("PRAGMA user_version").get() as {
       user_version: number;
@@ -77,7 +83,12 @@ test("fresh schema is version 1 and seeds disabled routine data with permanent h
       .prepare("SELECT company, dry_run FROM sent_log ORDER BY company")
       .all() as Array<{ company: string; dry_run: number }>;
 
-    assert.equal(version.user_version, 1);
+    assert.equal(version.user_version, 2);
+    const itemColumns = db.prepare("PRAGMA table_info(items)").all() as Array<{
+      name: string;
+    }>;
+
+    assert.ok(itemColumns.some((column) => column.name === "draft_subject"));
     assert.equal(routines.length, 1);
     assert.equal(routines[0].enabled, 0);
     assert.equal(routines[0].frozen, 0);
@@ -122,6 +133,7 @@ test("panel routes persist routine session bindings through create and update", 
         name: "Bound routine",
         session: "qube_cx_j10ra-github-io_3",
         sessionLabel: "codex · gpt-5.6-sol",
+        reviewedUpdatedAt: createdResponse.routine.updatedAt,
       },
       { id: String(createdResponse.routine.id) },
     )) as RoutineResponse;
@@ -138,6 +150,67 @@ test("panel routes persist routine session bindings through create and update", 
     } finally {
       db.close();
     }
+  });
+});
+
+test("routine edit rejects stale forms and accepts a reload retry", async () => {
+  await withPanelRoutes(async (routes) => {
+    const created = (await routes.call("POST", "/api/mailarr/routines", {
+      ...BASE_ROUTINE,
+      name: "Staleness protected",
+    })) as RoutineResponse;
+    const routineId = created.routine.id;
+
+    const missingBinding = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id",
+      {
+        ...BASE_ROUTINE,
+        name: "Unbound panel edit",
+      },
+      { id: String(routineId) },
+    )) as { status: number; body: { error: string } };
+
+    assert.equal(missingBinding.status, 400);
+    assert.match(missingBinding.body.error, /reviewed updated time is required/);
+
+    const agentEdit = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id",
+      {
+        ...BASE_ROUTINE,
+        name: "Agent edit",
+        reviewedUpdatedAt: created.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    const staleSave = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id",
+      {
+        ...BASE_ROUTINE,
+        name: "Stale panel edit",
+        reviewedUpdatedAt: created.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as { status: number; body: { error: string } };
+
+    assert.equal(staleSave.status, 400);
+    assert.match(staleSave.body.error, /reload current values and retry/);
+
+    const retried = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id",
+      {
+        ...BASE_ROUTINE,
+        name: "Reloaded panel edit",
+        reviewedUpdatedAt: agentEdit.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.ok(retried.routine.updatedAt > agentEdit.routine.updatedAt);
   });
 });
 
@@ -186,13 +259,13 @@ test("routines_due carries routine session bindings", async () => {
   });
 });
 
-test("schema rejects legacy versions instead of running compatibility migrations", () => {
+test("schema rejects legacy versions with database deletion guidance", () => {
   const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA user_version = 4");
+  db.exec("PRAGMA user_version = 1");
 
   assert.throws(
     () => initializeSchema(db),
-    /Unsupported Mailarr schema version 4/,
+    /Unsupported Mailarr schema version 1; delete mailarr\.db/,
   );
   assert.equal(db.isTransaction, false);
   db.close();
@@ -215,7 +288,7 @@ test("schema initialization rechecks version under its transaction", () => {
     assert.equal(
       (second.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      1,
+      2,
     );
   } finally {
     first.close();
@@ -451,7 +524,93 @@ test("pending age uses compact minute, hour, and day labels", () => {
   assert.equal(pendingAge("2030-01-01T12:00:00.000Z", now), "2d");
 });
 
-test("pipeline editor opens only when the host API succeeds", () => {
+test("briefing summary strips markdown and stays on one compact line", () => {
+  assert.equal(
+    briefingSummary("\n# **Run complete**\n\n- Sent three messages"),
+    "Run complete",
+  );
+  assert.equal(briefingSummary("`code` _review_", 8), "code re…");
+  assert.equal(briefingSummary(" \n "), "No briefing content.");
+});
+
+test("briefing markdown prefers the host renderer and has a formatted fallback", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const setWindow = (value: unknown) =>
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  const markdown = [
+    "# Run complete",
+    "",
+    "**Bold** and *italic* with `code`.",
+    "",
+    "- First",
+    "- Second",
+  ].join("\n");
+
+  try {
+    setWindow({});
+    const fallback = renderToStaticMarkup(
+      createElement(BriefingMarkdown, { markdown }),
+    );
+
+    assert.match(fallback, /role="heading"/);
+    assert.match(fallback, /<strong>Bold<\/strong>/);
+    assert.match(fallback, /<em>italic<\/em>/);
+    assert.match(fallback, /<code/);
+    assert.match(fallback, /<ul/);
+
+    setWindow({
+      __QUBE_SHARED__: {
+        ui: {
+          MarkdownView: ({ content }: { content: string }) =>
+            createElement("article", { "data-host-markdown": "true" }, content),
+        },
+      },
+    });
+    const hosted = renderToStaticMarkup(
+      createElement(BriefingMarkdown, { markdown }),
+    );
+
+    assert.match(hosted, /data-host-markdown="true"/);
+    assert.match(hosted, /Run complete/);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("module memory store restores keyed drafts and clears completed state", () => {
+  const store = createMemoryStore<{
+    name: string;
+    reviewedUpdatedAt: string;
+  }>();
+
+  store.write("routine:7", {
+    name: "Unsaved edit",
+    reviewedUpdatedAt: "2030-01-01T00:00:00.000Z",
+  });
+  store.write("routine:8", {
+    name: "Other edit",
+    reviewedUpdatedAt: "2030-01-02T00:00:00.000Z",
+  });
+
+  assert.deepEqual(store.read("routine:7"), {
+    name: "Unsaved edit",
+    reviewedUpdatedAt: "2030-01-01T00:00:00.000Z",
+  });
+  assert.equal(store.read("routine:8")?.name, "Other edit");
+  store.remove("routine:7");
+  assert.equal(store.read("routine:7"), undefined);
+  assert.equal(store.read("routine:8")?.name, "Other edit");
+});
+
+test("workbench routing covers center tabs and the in-panel fallback", () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const setWindow = (value: unknown) =>
     Object.defineProperty(globalThis, "window", {
@@ -461,35 +620,51 @@ test("pipeline editor opens only when the host API succeeds", () => {
     });
 
   try {
-    assert.ok(mailarr.editors?.some((editor) => editor.id === "pipeline"));
-    assert.equal(editorRoutineId({ routineId: 7 }), 7);
-    assert.equal(editorRoutineId({ routineId: 0 }), null);
-    assert.equal(editorRoutineId({}), null);
+    assert.ok(mailarr.editors?.some((editor) => editor.id === "workbench"));
+    assert.equal(workbenchTarget({ routineId: 7 }), 7);
+    assert.equal(workbenchTarget({ mode: "new" }), "new");
+    assert.equal(workbenchTarget({ routineId: 0 }), null);
+    assert.equal(workbenchTarget({}), null);
+    assert.equal(routineIdFromWorkbenchKey("routine:7"), 7);
+    assert.equal(routineIdFromWorkbenchKey("routine:new"), null);
+    assert.equal(routineIdFromWorkbenchKey(null), null);
 
     setWindow({});
-    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), false);
+    assert.equal(openRoutineWorkbench(11, { id: 7, name: "Scout" }), false);
+    assert.equal(openRoutineWorkbench(11, null), false);
 
-    let opened: { worktreeId: number; spec: unknown } | null = null;
+    const opened: Array<{ worktreeId: number; spec: unknown }> = [];
 
     setWindow({
       __QUBE_SHARED__: {
         editorTabs: {
           open: (worktreeId: number, spec: unknown) => {
-            opened = { worktreeId, spec };
+            opened.push({ worktreeId, spec });
           },
         },
       },
     });
 
-    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), true);
-    assert.deepEqual(opened, {
+    assert.equal(openRoutineWorkbench(11, { id: 7, name: "Scout" }), true);
+    assert.equal(openRoutineWorkbench(11, null), true);
+    assert.deepEqual(opened[0], {
       worktreeId: 11,
       spec: {
         ext: "mailarr",
-        editor: "pipeline",
+        editor: "workbench",
         key: "routine:7",
         title: "Scout",
         payload: { routineId: 7 },
+      },
+    });
+    assert.deepEqual(opened[1], {
+      worktreeId: 11,
+      spec: {
+        ext: "mailarr",
+        editor: "workbench",
+        key: "routine:new",
+        title: "New routine",
+        payload: { mode: "new" },
       },
     });
 
@@ -502,7 +677,7 @@ test("pipeline editor opens only when the host API succeeds", () => {
         },
       },
     });
-    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), false);
+    assert.equal(openRoutineWorkbench(11, { id: 7, name: "Scout" }), false);
   } finally {
     if (originalWindow) {
       Object.defineProperty(globalThis, "window", originalWindow);
@@ -681,6 +856,50 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         assert.match(JSON.stringify(response), /routine is frozen/iu);
       }
     }, dataDir);
+  });
+});
+
+test("item_update stores a reviewable draft subject and send subject is optional", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db);
+    const run = startRun(db, createRun(db, routine.id).id);
+    const item = addQualifiedItem(
+      db,
+      routine.id,
+      run.id,
+      "Draft Subject Company",
+      "draft-subject",
+    );
+
+    await withMailarrClient(async (client) => {
+      const tools = (await client.listTools()).tools;
+      const itemUpdate = tools.find((tool) => tool.name === "item_update");
+      const send = tools.find((tool) => tool.name === "send_first_contact");
+
+      assert.ok(itemUpdate);
+      assert.match(JSON.stringify(itemUpdate.inputSchema), /draft_subject/);
+      assert.ok(send);
+      assert.doesNotMatch(
+        JSON.stringify((send.inputSchema as { required?: string[] }).required ?? []),
+        /subject/,
+      );
+
+      const response = await client.callTool({
+        name: "item_update",
+        arguments: {
+          item_id: item.id,
+          draft_subject: "Stored review subject",
+          draft_pitch: validDraft(routine.requiredDisclosure),
+        },
+      });
+
+      assert.equal(response.isError, undefined);
+    }, dataDir);
+
+    const updated = getItem(db, item.id);
+
+    assert.equal(updated.draftSubject, "Stored review subject");
+    assert.equal(updated.draftPitch, validDraft(routine.requiredDisclosure));
   });
 });
 
@@ -963,6 +1182,79 @@ test("verbatim terms replace the token exactly once", () => {
     () => insertVerbatimTerms(`${TERMS_TOKEN}\n${TERMS_TOKEN}`, "Exact"),
     /exactly once/,
   );
+});
+
+test("send defaults to the reviewed draft subject and explicit subject overrides", async () => {
+  await withDatabaseAsync(async (db) => {
+    const routine = createTestRoutine(db);
+    setRoutineFrozen(db, routine.id, true);
+    const run = startRun(db, createRun(db, routine.id).id);
+    const storedItem = addQualifiedItem(
+      db,
+      routine.id,
+      run.id,
+      "Stored Subject Company",
+      "stored-subject",
+    );
+    const overrideItem = addQualifiedItem(
+      db,
+      routine.id,
+      run.id,
+      "Override Subject Company",
+      "override-subject",
+    );
+    const deliveredSubjects: string[] = [];
+
+    updateItem(db, storedItem.id, { draftSubject: "Stored subject 2" });
+    updateItem(db, overrideItem.id, { draftSubject: "Ignored stored subject" });
+
+    await assert.rejects(
+      sendFirstContact({
+        db,
+        itemId: storedItem.id,
+        runId: run.id,
+        to: storedItem.contactEmail ?? "",
+        draft: validDraft(routine.requiredDisclosure),
+        smtp: smtp(),
+        dryRun: false,
+      }),
+      /numeric characters/,
+    );
+    updateItem(db, storedItem.id, { draftSubject: "Stored review subject" });
+
+    await sendFirstContact({
+      db,
+      itemId: storedItem.id,
+      runId: run.id,
+      to: storedItem.contactEmail ?? "",
+      draft: validDraft(routine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: false,
+      deliver: async ({ subject }) => {
+        deliveredSubjects.push(subject);
+      },
+    });
+    await sendFirstContact({
+      db,
+      itemId: overrideItem.id,
+      runId: run.id,
+      to: overrideItem.contactEmail ?? "",
+      subject: "Explicit subject",
+      draft: validDraft(routine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: false,
+      deliver: async ({ subject }) => {
+        deliveredSubjects.push(subject);
+      },
+    });
+
+    assert.deepEqual(deliveredSubjects, [
+      "Stored review subject",
+      "Explicit subject",
+    ]);
+    assert.equal(getItem(db, storedItem.id).sentSubject, "Stored review subject");
+    assert.equal(getItem(db, overrideItem.id).sentSubject, "Explicit subject");
+  });
 });
 
 test("dry runs count toward the cap without creating permanent dedupe", async () => {

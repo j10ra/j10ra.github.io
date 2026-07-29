@@ -70,7 +70,9 @@ export interface Item {
   contactEmail: string | null;
   score: number;
   fitNotes: string | null;
+  draftSubject: string | null;
   draftPitch: string | null;
+  sentSubject: string | null;
   sentPitch: string | null;
   contactedDryRun: boolean;
   dropReason: string | null;
