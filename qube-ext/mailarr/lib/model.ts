@@ -16,6 +16,8 @@ export interface Routine {
   name: string;
   cron: string;
   orderText: string;
+  session: string | null;
+  sessionLabel: string | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];

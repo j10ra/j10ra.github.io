@@ -27,6 +27,8 @@ interface Routine {
   name: string;
   cron: string;
   orderText: string;
+  session: string | null;
+  sessionLabel: string | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];
@@ -76,6 +78,8 @@ interface RoutineForm {
   name: string;
   cron: string;
   orderText: string;
+  session: string;
+  sessionLabel: string;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string;
@@ -94,6 +98,8 @@ const EMPTY_FORM: RoutineForm = {
   name: "",
   cron: "0 9 * * *",
   orderText: "",
+  session: "",
+  sessionLabel: "",
   dailyCap: 5,
   verbatimTerms: "",
   blockedTopics: "",
@@ -248,6 +254,13 @@ function MailarrPanel() {
                 <span className="text-sm font-medium">{routine.name}</span>
                 <span className="text-[11px] text-muted-foreground">{routine.cron}</span>
               </div>
+              {routine.session ? (
+                <p className="mt-2 text-xs font-medium text-foreground">
+                  agent: {routine.sessionLabel ?? "unlabelled"} ({routine.session})
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">unbound</p>
+              )}
               <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
                 <span>{routine.newLeads} open</span>
                 <span>
@@ -316,6 +329,8 @@ function RoutineEditor({
           name: routine.name,
           cron: routine.cron,
           orderText: routine.orderText,
+          session: routine.session ?? "",
+          sessionLabel: routine.sessionLabel ?? "",
           dailyCap: routine.dailyCap,
           verbatimTerms: routine.verbatimTerms,
           blockedTopics: routine.blockedTopics.join("\n"),
@@ -343,6 +358,8 @@ function RoutineEditor({
         name: value.name,
         cron: value.cron,
         orderText: value.orderText,
+        session: value.session.trim() || null,
+        sessionLabel: value.sessionLabel.trim() || null,
         dailyCap: value.dailyCap,
         verbatimTerms: value.verbatimTerms,
         blockedTopics: value.blockedTopics
@@ -406,6 +423,33 @@ function RoutineEditor({
             />
           </Field>
         </div>
+      </FormSection>
+
+      <FormSection title="Agent">
+        <Field
+          label="Session id"
+          helper="which session's agent executes this routine (empty = any)"
+        >
+          <input
+            className={INPUT_CLASS}
+            value={value.session}
+            onChange={(event) =>
+              setValue({ ...value, session: event.target.value })
+            }
+          />
+        </Field>
+        <Field
+          label="Session label"
+          helper="describe the agent so the card shows it"
+        >
+          <input
+            className={INPUT_CLASS}
+            value={value.sessionLabel}
+            onChange={(event) =>
+              setValue({ ...value, sessionLabel: event.target.value })
+            }
+          />
+        </Field>
       </FormSection>
 
       <FormSection title="Order">

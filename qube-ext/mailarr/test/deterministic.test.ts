@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { ExtensionContext } from "@qube-code/extension-sdk";
 import {
   addSource,
   createRoutine,
@@ -37,12 +38,15 @@ import {
 } from "../lib/send.js";
 import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js";
 import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
+import { registerMailarrRoutes } from "../routes.js";
 import { serializeKeywordWeights } from "../web/index.js";
 
 const BASE_ROUTINE: RoutineInput = {
   name: "General outreach",
   cron: "0 10 * * 1",
   orderText: "Follow the routine instructions.",
+  session: null,
+  sessionLabel: null,
   dailyCap: 5,
   verbatimTerms: "Availability: 20 hours per week at $120/hr.",
   blockedTopics: ["restricted topic", "private-data"],
@@ -69,6 +73,8 @@ test("fresh schema is version 1 and seeds disabled routine data with permanent h
     assert.equal(version.user_version, 1);
     assert.equal(routines.length, 1);
     assert.equal(routines[0].enabled, 0);
+    assert.equal(routines[0].session, null);
+    assert.equal(routines[0].session_label, null);
     assert.equal(routines[0].keywords, null);
     assert.equal(routines[0].score_floor, null);
     assert.equal(sourceCount.count, 0);
@@ -80,6 +86,94 @@ test("fresh schema is version 1 and seeds disabled routine data with permanent h
       ],
     );
     assert.equal(hasSentCompany(db, "faithlife"), true);
+  });
+});
+
+test("panel routes persist routine session bindings through create and update", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const createdResponse = (await routes.call(
+      "POST",
+      "/api/mailarr/routines",
+      {
+        ...BASE_ROUTINE,
+        name: "Bound routine",
+        session: "qube_cc_j10ra-github-io_2",
+        sessionLabel: "claude · sonnet",
+      },
+    )) as RoutineResponse;
+
+    assert.equal(createdResponse.routine.session, "qube_cc_j10ra-github-io_2");
+    assert.equal(createdResponse.routine.sessionLabel, "claude · sonnet");
+
+    const updatedResponse = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id",
+      {
+        ...BASE_ROUTINE,
+        name: "Bound routine",
+        session: "qube_cx_j10ra-github-io_3",
+        sessionLabel: "codex · gpt-5.6-sol",
+      },
+      { id: String(createdResponse.routine.id) },
+    )) as RoutineResponse;
+
+    assert.equal(updatedResponse.routine.session, "qube_cx_j10ra-github-io_3");
+    assert.equal(updatedResponse.routine.sessionLabel, "codex · gpt-5.6-sol");
+
+    const db = openMailarrDatabase(dataDir);
+    try {
+      const persisted = getRoutine(db, createdResponse.routine.id);
+
+      assert.equal(persisted.session, "qube_cx_j10ra-github-io_3");
+      assert.equal(persisted.sessionLabel, "codex · gpt-5.6-sol");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("routines_due carries routine session bindings", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db, {
+      session: "qube_cc_j10ra-github-io_2",
+      sessionLabel: "claude · sonnet",
+    });
+    createRun(db, routine.id);
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "routines_due",
+        arguments: {},
+      });
+      const content = response.content as Array<{ type: string; text?: string }>;
+
+      assert.equal(response.isError, undefined);
+      assert.equal(content[0]?.type, "text");
+      const runs = JSON.parse(content[0]?.text ?? "[]") as Array<{
+        session: string | null;
+        sessionLabel: string | null;
+      }>;
+
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].session, "qube_cc_j10ra-github-io_2");
+      assert.equal(runs[0].sessionLabel, "claude · sonnet");
+
+      const routineResponse = await client.callTool({
+        name: "routine_get",
+        arguments: { routine_id: routine.id },
+      });
+      const routineContent = routineResponse.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      const fetched = JSON.parse(routineContent[0]?.text ?? "{}") as {
+        session: string | null;
+        sessionLabel: string | null;
+      };
+
+      assert.equal(fetched.session, "qube_cc_j10ra-github-io_2");
+      assert.equal(fetched.sessionLabel, "claude · sonnet");
+    }, dataDir);
   });
 });
 
@@ -371,6 +465,8 @@ test("agent tool surface cannot mutate routine-owned guard data", async () => {
       "daily_cap",
       "keywords",
       "score_floor",
+      "session",
+      "session_label",
     ]) {
       assert.doesNotMatch(writableSchemas, new RegExp(field));
     }
@@ -702,13 +798,13 @@ function withDatabase(action: (db: DatabaseSync) => void): void {
 }
 
 async function withDatabaseAsync(
-  action: (db: DatabaseSync) => Promise<void>,
+  action: (db: DatabaseSync, dataDir: string) => Promise<void>,
 ): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "mailarr-test-"));
   const db = openMailarrDatabase(dataDir);
 
   try {
-    await action(db);
+    await action(db, dataDir);
   } finally {
     db.close();
     rmSync(dataDir, { recursive: true, force: true });
@@ -717,9 +813,12 @@ async function withDatabaseAsync(
 
 async function withMailarrClient(
   action: (client: Client) => Promise<void>,
+  dataDir?: string,
 ): Promise<void> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = mailarrMcpServer(() => {
+    if (dataDir) return { dataDir } as ExtensionContext;
+
     throw new Error("test context is unavailable");
   });
   const client = new Client({ name: "mailarr-test", version: "1.0.0" });
@@ -733,5 +832,85 @@ async function withMailarrClient(
   } finally {
     await client.close();
     await server.close();
+  }
+}
+
+interface RoutineResponse {
+  routine: {
+    id: number;
+    session: string | null;
+    sessionLabel: string | null;
+  };
+}
+
+type PanelMethod = "GET" | "POST" | "PUT";
+type PanelRequest = {
+  body?: unknown;
+  params: Record<string, string>;
+  query: Record<string, string>;
+};
+type PanelReply = {
+  code: (status: number) => {
+    send: (body: unknown) => unknown;
+  };
+};
+type PanelHandler = (
+  request: PanelRequest,
+  reply: PanelReply,
+) => Promise<unknown>;
+
+async function withPanelRoutes(
+  action: (
+    routes: {
+      call: (
+        method: PanelMethod,
+        path: string,
+        body?: unknown,
+        params?: Record<string, string>,
+      ) => Promise<unknown>;
+    },
+    dataDir: string,
+  ) => Promise<void>,
+): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "mailarr-routes-test-"));
+  const handlers = new Map<string, PanelHandler>();
+  const register =
+    (method: PanelMethod) => (path: string, handler: PanelHandler) => {
+      handlers.set(`${method} ${path}`, handler);
+    };
+  const app = {
+    get: register("GET"),
+    post: register("POST"),
+    put: register("PUT"),
+  } as unknown as Parameters<typeof registerMailarrRoutes>[0];
+  const ctx = {
+    dataDir,
+    broadcast: () => undefined,
+  } as unknown as ExtensionContext;
+
+  registerMailarrRoutes(app, () => ctx);
+
+  try {
+    await action(
+      {
+        call: async (method, path, body, params = {}) => {
+          const handler = handlers.get(`${method} ${path}`);
+
+          assert.ok(handler, `route not registered: ${method} ${path}`);
+
+          return handler(
+            { body, params, query: {} },
+            {
+              code: (status) => ({
+                send: (responseBody) => ({ status, body: responseBody }),
+              }),
+            },
+          );
+        },
+      },
+      dataDir,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
   }
 }
