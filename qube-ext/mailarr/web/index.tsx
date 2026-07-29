@@ -122,6 +122,31 @@ const SOURCE_STATUS_CLASS: Record<SourceStatus, string> = {
   dead: "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
+export function serializeKeywordWeights(
+  rows: Array<{ term: string; weight: string }>,
+): Record<string, number> | null {
+  const keywords = new Map<string, number>();
+
+  for (const row of rows) {
+    const term = row.term.trim();
+
+    if (!term) continue;
+    if (!row.weight.trim()) {
+      throw new Error(`Weight for "${term}" is required`);
+    }
+
+    const weight = Number(row.weight);
+
+    if (!Number.isFinite(weight)) {
+      throw new Error(`Weight for "${term}" must be finite`);
+    }
+
+    keywords.set(term, weight);
+  }
+
+  return keywords.size ? Object.fromEntries(keywords) : null;
+}
+
 const mailarr: WebExtension = {
   id: "mailarr",
   panels: [
@@ -313,12 +338,7 @@ function RoutineEditor({
   const save = async () => {
     setSaving(true);
     try {
-      const keywordEntries = value.keywords
-        .filter(({ term }) => term.trim())
-        .map(({ term, weight }) => [term, Number(weight)] as const);
-      const keywords = keywordEntries.length
-        ? Object.fromEntries(keywordEntries)
-        : null;
+      const keywords = serializeKeywordWeights(value.keywords);
       const body = {
         name: value.name,
         cron: value.cron,

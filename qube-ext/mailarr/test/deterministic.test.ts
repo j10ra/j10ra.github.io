@@ -37,6 +37,7 @@ import {
 } from "../lib/send.js";
 import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js";
 import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
+import { serializeKeywordWeights } from "../web/index.js";
 
 const BASE_ROUTINE: RoutineInput = {
   name: "General outreach",
@@ -215,6 +216,25 @@ test("word-boundary scoring uses only routine-provided rules", () => {
     score: 7,
     matches: ["ui", "expo"],
   });
+});
+
+test("keyword weights trim terms, dedupe them, and reject empty weights", () => {
+  assert.deepEqual(
+    serializeKeywordWeights([
+      { term: " react ", weight: "2" },
+      { term: "react", weight: "4" },
+      { term: "  ", weight: "" },
+    ]),
+    { react: 4 },
+  );
+  assert.throws(
+    () => serializeKeywordWeights([{ term: "react", weight: "" }]),
+    /Weight for "react" is required/,
+  );
+  assert.throws(
+    () => serializeKeywordWeights([{ term: "react", weight: "Infinity" }]),
+    /Weight for "react" must be finite/,
+  );
 });
 
 test("items_add applies a floor only when the routine defines keywords", () => {
