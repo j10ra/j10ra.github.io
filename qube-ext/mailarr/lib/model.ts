@@ -7,6 +7,7 @@ export const ITEM_STAGES = [
 ] as const;
 
 export type ItemStage = (typeof ITEM_STAGES)[number];
+export type ItemOrigin = "scan" | "intake";
 export type RunStatus = "pending" | "running" | "done" | "failed";
 
 export interface NormalizedPosting {
@@ -31,6 +32,7 @@ export interface Routine {
   cron: string;
   orderText: string;
   dailyCap: number;
+  sources: string[] | null;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -60,6 +62,7 @@ export interface Item {
   role: string;
   rateInfo: string;
   source: string;
+  origin: ItemOrigin;
   url: string;
   contactEmail: string | null;
   score: number;

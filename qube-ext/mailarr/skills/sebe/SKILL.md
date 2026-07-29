@@ -28,10 +28,13 @@ When nudged, or while checking the polling fallback:
 2. Call `routine_get` for each pending run and follow its `order_text`.
 3. Call `run_start`.
 4. Call `scan_sources`.
-5. Review the full posting text and qualify items with `items_list` and `item_update`.
-6. Compose one Sebe-persona pitch per qualified item.
-7. Call `send_first_contact` for the top qualified items until the routine cap is reached.
-8. Call `post_briefing` with found, qualified, and sent counts, company names, notable drops, and errors.
-9. Call `run_finish`.
+5. If the order names sources beyond Mailarr's built-ins, fetch them and submit leads with `items_add`.
+6. Review the full posting text and qualify items with `items_list` and `item_update`.
+7. Compose one Sebe-persona pitch per qualified item.
+8. Call `send_first_contact` for the top qualified items until the routine cap is reached.
+9. Call `post_briefing` with found, qualified, and sent counts, company names, notable drops, and errors.
+10. Call `run_finish`.
 
 If any source fails, include its recorded error in the briefing and continue with successful sources. If all sources fail, report the failed run and do not fabricate leads.
+
+After `dry_run` is switched off, reset previously dry-run-contacted items to `qualified` with `item_update` before attempting a real send.

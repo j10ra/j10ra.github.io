@@ -12,6 +12,7 @@ import {
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
+import { BUILT_IN_SOURCES } from "./lib/sources/catalog.js";
 
 type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
 type ExtensionApp = Parameters<RegisterRoutes>[0];
@@ -124,14 +125,32 @@ function routineInput(value: unknown): {
   cron: string;
   orderText: string;
   dailyCap: number;
+  sources: string[] | null;
 } {
   const body = record(value);
   const name = string(body.name, "name");
   const cron = string(body.cron, "cron");
   const orderText = string(body.orderText, "order");
   const dailyCap = positiveInt(body.dailyCap, "daily cap");
+  const sources = routineSources(body.sources);
 
-  return { name, cron, orderText, dailyCap };
+  return { name, cron, orderText, dailyCap, sources };
+}
+
+function routineSources(value: unknown): string[] | null {
+  if (value == null) return null;
+  if (!Array.isArray(value)) throw new Error("sources must be an array");
+
+  const valid = new Set<string>(BUILT_IN_SOURCES.map((source) => source.id));
+  const sources = value.map((source) => {
+    if (typeof source !== "string" || !valid.has(source)) {
+      throw new Error(`invalid built-in source: ${String(source)}`);
+    }
+
+    return source;
+  });
+
+  return [...new Set(sources)];
 }
 
 function parseStage(value: unknown): ItemStage | undefined {

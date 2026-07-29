@@ -13,7 +13,7 @@ import {
   updateItem,
 } from "./lib/db.js";
 import { ITEM_STAGES } from "./lib/model.js";
-import { scanSources } from "./lib/scan.js";
+import { addItems, scanSources } from "./lib/scan.js";
 import { sendFirstContact } from "./lib/send.js";
 
 const text = (value: unknown) => ({
@@ -32,10 +32,11 @@ export const MAILARR_INSTRUCTIONS = [
   "1. Call routines_due.",
   "2. For each pending run, call routine_get and follow its order_text.",
   "3. Call run_start, then scan_sources.",
-  "4. Page through items_list, qualify with item_update, and write one pitch per qualified lead.",
-  "5. Call send_first_contact for the top qualified items until the routine cap is reached.",
-  "6. Call post_briefing with counts, company names, notable drops, and source errors.",
-  "7. Call run_finish.",
+  "4. If the order names sources beyond the built-ins, fetch them and submit leads with items_add.",
+  "5. Page through items_list, qualify with item_update, and write one pitch per qualified lead.",
+  "6. Call send_first_contact for the top qualified items until the routine cap is reached.",
+  "7. Call post_briefing with counts, company names, notable drops, and source errors.",
+  "8. Call run_finish.",
   "",
   "Use the commercial terms token exactly once in every draft. The send tool replaces it with",
   "settings-controlled terms, validates the pitch, enforces the daily cap and permanent company",
@@ -91,11 +92,60 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "scan_sources",
     {
       description:
-        "Fetch every configured source, score full descriptions, extract apply-context emails, " +
-        "drop below-floor posts, and store discovered items. Individual source failures are recorded.",
+        "Fetch the routine's enabled built-in sources, score full descriptions, extract " +
+        "apply-context emails, drop below-floor posts, and store discovered items. " +
+        "Individual source failures are recorded.",
       inputSchema: { run_id: z.number().int().positive() },
     },
     ({ run_id }) => withDb(ctx, (db) => scanSources(db, run_id), true),
+  );
+
+  server.registerTool(
+    "items_add",
+    {
+      description:
+        "Submit agent-fetched leads through Mailarr's guarded intake. Items are scored, " +
+        "deduplicated, email-filtered, and stored at discovered for the current run.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        run_id: z.number().int().positive(),
+        items: z
+          .array(
+            z.object({
+              company: z.string().min(1),
+              role: z.string().min(1),
+              url: z.string().url(),
+              source_label: z.string().min(1),
+              contact_email: z.string().optional(),
+              rate_info: z.string().optional(),
+              description: z.string().optional(),
+              payload: z.unknown().optional(),
+            }),
+          )
+          .min(1),
+      },
+    },
+    ({ routine_id, run_id, items }) =>
+      withDb(
+        ctx,
+        (db) =>
+          addItems(
+            db,
+            routine_id,
+            run_id,
+            items.map((item) => ({
+              company: item.company,
+              role: item.role,
+              url: item.url,
+              sourceLabel: item.source_label,
+              contactEmail: item.contact_email,
+              rateInfo: item.rate_info,
+              description: item.description,
+              payload: item.payload,
+            })),
+          ),
+        true,
+      ),
   );
 
   server.registerTool(

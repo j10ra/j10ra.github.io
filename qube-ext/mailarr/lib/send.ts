@@ -118,6 +118,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     const terms = formatCommercialTerms(input.commercial);
     const body = insertCommercialTerms(input.draft, terms);
     const postingText =
+      item.origin === "scan" &&
       typeof item.payload === "object" &&
       item.payload !== null &&
       "description" in item.payload &&
