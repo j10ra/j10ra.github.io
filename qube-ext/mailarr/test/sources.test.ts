@@ -56,7 +56,7 @@ test("HN parser normalizes top-level hiring comments from its captured payload",
 
   assert.equal(posting.company, "Goody");
   assert.match(posting.role, /Remote/);
-  assert.match(posting.description, /mark@ongoody\.com/);
+  assert.match(posting.description, /hiring@example\.test/);
   assert.equal(posting.rateInfo, "$250K – $300K");
 });
 

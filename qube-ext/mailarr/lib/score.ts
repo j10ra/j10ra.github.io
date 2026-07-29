@@ -19,6 +19,7 @@ export function scoreText(
   text: string,
   rules: Record<string, number> = DEFAULT_RULES,
 ): { score: number; matches: string[] } {
+  const normalizedText = text.replace(/[\p{Pd}-]+/gu, " ");
   const matches: string[] = [];
   let score = 0;
 
@@ -29,7 +30,7 @@ export function scoreText(
       "iu",
     );
 
-    if (!pattern.test(text)) continue;
+    if (!pattern.test(normalizedText)) continue;
 
     matches.push(term);
     score += weight;

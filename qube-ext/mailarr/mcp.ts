@@ -261,7 +261,7 @@ function configString(config: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : value == null ? "" : String(value);
 }
 
-function dryRunEnabled(config: Record<string, unknown>): boolean {
+export function dryRunEnabled(config: Record<string, unknown>): boolean {
   const value = config.dry_run;
 
   if (value === undefined || value === null || value === "") return true;

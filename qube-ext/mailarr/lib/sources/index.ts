@@ -12,7 +12,7 @@ export interface ScanFetchResult {
   failedSources: number;
 }
 
-const SOURCES: Array<{ name: string; fetch: () => Promise<NormalizedPosting[]> }> = [
+export const SOURCES: Array<{ name: string; fetch: () => Promise<NormalizedPosting[]> }> = [
   { name: "RemoteOK", fetch: fetchRemoteOk },
   { name: "Remotive", fetch: fetchRemotive },
   { name: "WeWorkRemotely", fetch: fetchWeWorkRemotely },

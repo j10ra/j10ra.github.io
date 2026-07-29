@@ -34,6 +34,9 @@ export function openMailarrDatabase(dataDir: string): DatabaseSync {
 }
 
 export function migrate(db: DatabaseSync): void {
+  const versionRow = db.prepare("PRAGMA user_version").get() as { user_version: number };
+  const version = Number(versionRow.user_version);
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS routines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,7 +90,7 @@ export function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS sent_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company TEXT NOT NULL,
-      normalized_company TEXT NOT NULL UNIQUE,
+      normalized_company TEXT NOT NULL,
       email TEXT NOT NULL,
       subject TEXT NOT NULL,
       body TEXT NOT NULL,
@@ -103,11 +106,65 @@ export function migrate(db: DatabaseSync): void {
       created_at TEXT NOT NULL
     );
 
+  `);
+
+  migrateLegacySentLog(db);
+
+  db.exec(`
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
     CREATE INDEX IF NOT EXISTS items_run_stage_idx ON items(run_id, stage);
     CREATE INDEX IF NOT EXISTS sent_log_sent_at_idx ON sent_log(sent_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS sent_log_real_company_idx
+      ON sent_log(normalized_company)
+      WHERE dry_run = 0;
   `);
 
+  if (version < 1) seedInitialData(db);
+
+  db.exec("PRAGMA user_version = 2");
+}
+
+function migrateLegacySentLog(db: DatabaseSync): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sent_log'")
+    .get() as { sql?: string } | undefined;
+
+  if (!row?.sql || !/normalized_company\s+TEXT\s+NOT NULL\s+UNIQUE/iu.test(row.sql)) return;
+
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE sent_log_next (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company TEXT NOT NULL,
+        normalized_company TEXT NOT NULL,
+        email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        sent_at TEXT NOT NULL,
+        run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+        dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1))
+      );
+      INSERT INTO sent_log_next
+        (id, company, normalized_company, email, subject, body, sent_at, run_id, dry_run)
+      SELECT id, company, normalized_company, email, subject, body, sent_at, run_id, dry_run
+      FROM sent_log;
+      DROP TABLE sent_log;
+      ALTER TABLE sent_log_next RENAME TO sent_log;
+      COMMIT;
+    `);
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function seedInitialData(db: DatabaseSync): void {
   const seededAt = "2026-07-28T00:00:00.000Z";
 
   db.prepare(`
@@ -115,7 +172,6 @@ export function migrate(db: DatabaseSync): void {
       (name, cron, order_text, daily_cap, enabled, created_at, updated_at)
     VALUES (?, ?, ?, ?, 0, ?, ?)
   `).run("Job Scout", "0 9 * * *", JOB_SCOUT_ORDER, 5, seededAt, seededAt);
-
   const seedSent = db.prepare(`
     INSERT OR IGNORE INTO sent_log
       (company, normalized_company, email, subject, body, sent_at, run_id, dry_run)
@@ -323,8 +379,14 @@ export function insertPosting(
   posting: NormalizedPosting,
   score: number,
   contactEmail: string | null,
-): boolean {
+): "inserted" | "refreshed" | "ignored" {
   const at = nowIso();
+  const normalizedCompany = normalizeCompany(posting.company);
+  const payloadJson = JSON.stringify({
+    raw: posting.payload,
+    description: posting.description,
+    publishedAt: posting.publishedAt,
+  });
   const result = db
     .prepare(`
       INSERT OR IGNORE INTO items (
@@ -336,23 +398,53 @@ export function insertPosting(
       routineId,
       runId,
       posting.company,
-      normalizeCompany(posting.company),
+      normalizedCompany,
       posting.role,
       posting.rateInfo,
       posting.source,
       posting.url,
       contactEmail,
       score,
-      JSON.stringify({
-        raw: posting.payload,
-        description: posting.description,
-        publishedAt: posting.publishedAt,
-      }),
+      payloadJson,
       at,
       at,
     );
 
-  return result.changes > 0;
+  if (result.changes > 0) return "inserted";
+
+  const refreshed = db
+    .prepare(`
+      UPDATE items
+      SET routine_id = ?,
+          run_id = ?,
+          company = ?,
+          role = ?,
+          rate_info = ?,
+          source = ?,
+          contact_email = COALESCE(?, contact_email),
+          score = ?,
+          payload_json = ?,
+          updated_at = ?
+      WHERE normalized_company = ?
+        AND url = ?
+        AND stage IN ('discovered', 'qualified')
+    `)
+    .run(
+      routineId,
+      runId,
+      posting.company,
+      posting.role,
+      posting.rateInfo,
+      posting.source,
+      contactEmail,
+      score,
+      payloadJson,
+      at,
+      normalizedCompany,
+      posting.url,
+    );
+
+  return refreshed.changes > 0 ? "refreshed" : "ignored";
 }
 
 export function getItem(db: DatabaseSync, id: number): Item {
@@ -491,7 +583,7 @@ export function sentTodayCount(db: DatabaseSync, routineId: number, now = new Da
       SELECT COUNT(*) AS count
       FROM sent_log
       JOIN runs ON runs.id = sent_log.run_id
-      WHERE runs.routine_id = ? AND sent_at >= ? AND sent_at < ?
+      WHERE runs.routine_id = ? AND dry_run = 0 AND sent_at >= ? AND sent_at < ?
     `)
     .get(routineId, start.toISOString(), end.toISOString()) as DbRow;
 
@@ -501,7 +593,7 @@ export function sentTodayCount(db: DatabaseSync, routineId: number, now = new Da
 export function hasSentCompany(db: DatabaseSync, company: string): boolean {
   return Boolean(
     db
-      .prepare("SELECT 1 FROM sent_log WHERE normalized_company = ?")
+      .prepare("SELECT 1 FROM sent_log WHERE normalized_company = ? AND dry_run = 0")
       .get(normalizeCompany(company)),
   );
 }
@@ -537,10 +629,21 @@ export function recordSent(
     );
     db.prepare(`
       UPDATE items
-      SET stage = 'contacted', sent_pitch = ?, contact_email = ?, updated_at = ?
+      SET stage = CASE WHEN ? = 1 THEN stage ELSE 'contacted' END,
+          sent_pitch = ?,
+          contact_email = ?,
+          updated_at = ?
       WHERE id = ?
-    `).run(input.body, input.email, input.sentAt, input.itemId);
-    db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
+    `).run(
+      input.dryRun ? 1 : 0,
+      input.body,
+      input.email,
+      input.sentAt,
+      input.itemId,
+    );
+    if (!input.dryRun) {
+      db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
+    }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

@@ -21,6 +21,8 @@ const DEAD_LOCALS = new Set([
 const APPLY_CONTEXT =
   /\b(apply|application|candidate|contact|cv|email|hiring|reach out|résumé|resume|send)\b/iu;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu;
+const DEAD_LOCAL_PREFIX =
+  /^(?:accommodations?|careers|hr|jobs|no-?reply|recruiting|recruitment|talent)(?:[+._-]|$)/iu;
 
 export interface EmailCandidate {
   email: string;
@@ -34,7 +36,7 @@ export function extractApplyEmail(text: string, proximity = 240): string | null 
     const email = match[0];
     const local = email.slice(0, email.indexOf("@")).toLowerCase();
 
-    if (DEAD_LOCALS.has(local)) continue;
+    if (DEAD_LOCALS.has(local) || DEAD_LOCAL_PREFIX.test(local)) continue;
 
     const index = match.index ?? 0;
     const from = Math.max(0, index - proximity);

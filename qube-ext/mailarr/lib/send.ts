@@ -8,7 +8,7 @@ import {
   recordSent,
   sentTodayCount,
 } from "./db.js";
-import { COMMERCIAL_TERMS_TOKEN, validatePitch } from "./validate.js";
+import { COMMERCIAL_TERMS_TOKEN, validatePitch, validateSubject } from "./validate.js";
 
 export interface CommercialSettings {
   hourlyFloor: string;
@@ -73,7 +73,7 @@ export function insertCommercialTerms(draft: string, terms: string): string {
     throw new Error(`Pitch must include ${COMMERCIAL_TERMS_TOKEN} exactly once`);
   }
 
-  return draft.replace(COMMERCIAL_TERMS_TOKEN, terms);
+  return draft.replace(COMMERCIAL_TERMS_TOKEN, () => terms);
 }
 
 export function enforceSendGuards(
@@ -83,8 +83,8 @@ export function enforceSendGuards(
   const item = getItem(db, input.itemId);
   const run = getRun(db, input.runId);
 
-  if (item.runId !== run.id || item.routineId !== run.routineId) {
-    throw new Error("Item and run do not belong to the same routine execution");
+  if (item.routineId !== run.routineId) {
+    throw new Error("Item and run do not belong to the same routine");
   }
   if (run.status !== "running") throw new Error("Send requires a running run");
   if (item.stage !== "qualified") throw new Error("Only qualified items can be contacted");
@@ -109,6 +109,12 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
   try {
     enforceSendGuards(input.db, input);
     const item = getItem(input.db, input.itemId);
+    const recipient = input.to.trim().toLowerCase();
+
+    if (item.contactEmail && recipient !== item.contactEmail.trim().toLowerCase()) {
+      throw new Error("Recipient must match the item's extracted contact email");
+    }
+
     const terms = formatCommercialTerms(input.commercial);
     const body = insertCommercialTerms(input.draft, terms);
     const postingText =
@@ -119,10 +125,12 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
         ? item.payload.description
         : "";
     const validation = validatePitch({ pitch: body, postingText, commercialTerms: terms });
+    const subjectValidation = validateSubject({ subject: input.subject, postingText });
 
-    if (!validation.valid) throw new Error(validation.errors.join("; "));
+    const errors = [...validation.errors, ...subjectValidation.errors];
 
-    if (!input.to.trim()) throw new Error("A recipient email is required");
+    if (errors.length) throw new Error(errors.join("; "));
+    if (!recipient) throw new Error("A recipient email is required");
     if (!input.subject.trim()) throw new Error("A subject is required");
 
     const deliver = input.deliver ?? ((message) => deliverSmtp(message, input.smtp));

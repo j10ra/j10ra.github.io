@@ -2,11 +2,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { extractApplyEmail } from "./extract-email.js";
 import { getRun, insertPosting, recordScanResult } from "./db.js";
 import { DEFAULT_SCORE_FLOOR, scoreText } from "./score.js";
-import { fetchAllSources } from "./sources/index.js";
+import { fetchAllSources, SOURCES } from "./sources/index.js";
 
 export interface ScanSummary {
   found: number;
   accepted: number;
+  inserted: number;
+  refreshed: number;
+  alreadyHandled: number;
   droppedBelowFloor: number;
   errors: string[];
   fullyFailed: boolean;
@@ -22,8 +25,10 @@ export async function scanSources(
   if (run.status !== "running") throw new Error("scan_sources requires a running run");
 
   const fetched = await fetchAllSources();
-  const fullyFailed = fetched.failedSources === 6;
-  let accepted = 0;
+  const fullyFailed = fetched.failedSources === SOURCES.length;
+  let inserted = 0;
+  let refreshed = 0;
+  let alreadyHandled = 0;
   let droppedBelowFloor = 0;
 
   if (!fullyFailed) {
@@ -35,18 +40,18 @@ export async function scanSources(
         continue;
       }
 
-      if (
-        insertPosting(
-          db,
-          run.routineId,
-          run.id,
-          posting,
-          scored.score,
-          extractApplyEmail(posting.description),
-        )
-      ) {
-        accepted += 1;
-      }
+      const stored = insertPosting(
+        db,
+        run.routineId,
+        run.id,
+        posting,
+        scored.score,
+        extractApplyEmail(posting.description),
+      );
+
+      if (stored === "inserted") inserted += 1;
+      else if (stored === "refreshed") refreshed += 1;
+      else alreadyHandled += 1;
     }
   }
 
@@ -54,7 +59,10 @@ export async function scanSources(
 
   return {
     found: fetched.postings.length,
-    accepted,
+    accepted: inserted + refreshed,
+    inserted,
+    refreshed,
+    alreadyHandled,
     droppedBelowFloor,
     errors: fetched.errors,
     fullyFailed,

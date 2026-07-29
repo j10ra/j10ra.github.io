@@ -1,5 +1,4 @@
-import type { ExtensionContext, RouteRequest } from "@qube-code/extension-sdk";
-import type { FastifyInstance } from "fastify";
+import type { Extension, ExtensionContext, RouteRequest } from "@qube-code/extension-sdk";
 import {
   createRoutine,
   createRun,
@@ -14,10 +13,12 @@ import {
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
 
-type ContextResolver = (req?: RouteRequest) => ExtensionContext | null;
+type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
+type ExtensionApp = Parameters<RegisterRoutes>[0];
+type ContextResolver = Parameters<RegisterRoutes>[1];
 
 export function registerMailarrRoutes(
-  app: FastifyInstance,
+  app: ExtensionApp,
   getCtx: ContextResolver,
 ): void {
   app.get("/api/mailarr/routines", async (req, reply) =>
@@ -105,13 +106,16 @@ async function useDb<T>(
 
   if (!ctx) return reply.code(409).send({ error: "no project open" });
 
-  const db = openMailarrDatabase(ctx.dataDir);
+  let db: ReturnType<typeof openMailarrDatabase> | undefined;
+
   try {
+    db = openMailarrDatabase(ctx.dataDir);
+
     return await action(db, ctx);
   } catch (error) {
     return reply.code(400).send({ error: message(error) });
   } finally {
-    db.close();
+    db?.close();
   }
 }
 

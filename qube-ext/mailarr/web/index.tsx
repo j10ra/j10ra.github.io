@@ -131,9 +131,8 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
   };
 
   const openRoutine = (routine: Routine) => {
-    if (openPipelineEditor(worktreeId, routine)) return;
-
     setInlineRoutineId(routine.id);
+    openPipelineEditor(worktreeId, routine);
   };
 
   if (inlineRoutineId !== null) {
@@ -574,7 +573,7 @@ function IconButton({
   );
 }
 
-function openPipelineEditor(worktreeId: number, routine: Routine): boolean {
+function openPipelineEditor(worktreeId: number, routine: Routine): void {
   const shared = (
     globalThis as typeof globalThis & {
       __QUBE_SHARED__?: {
@@ -594,17 +593,19 @@ function openPipelineEditor(worktreeId: number, routine: Routine): boolean {
     }
   ).__QUBE_SHARED__;
 
-  if (!shared?.editorTabs?.open) return false;
+  if (!shared?.editorTabs?.open) return;
 
-  shared.editorTabs.open(worktreeId, {
-    ext: "mailarr",
-    editor: "pipeline",
-    key: `routine:${routine.id}`,
-    title: routine.name,
-    payload: { routineId: routine.id },
-  });
-
-  return true;
+  try {
+    shared.editorTabs.open(worktreeId, {
+      ext: "mailarr",
+      editor: "pipeline",
+      key: `routine:${routine.id}`,
+      title: routine.name,
+      payload: { routineId: routine.id },
+    });
+  } catch {
+    // The inline pipeline is already selected as the safe fallback.
+  }
 }
 
 function editorRoutineId(payload: unknown): number | null {

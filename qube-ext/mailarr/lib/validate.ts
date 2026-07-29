@@ -13,6 +13,15 @@ export interface PitchValidation {
   errors: string[];
 }
 
+export function validateSubject(input: {
+  subject: string;
+  postingText: string;
+}): PitchValidation {
+  const errors = guardedContentErrors(input.subject, input.postingText, "Subject");
+
+  return { valid: errors.length === 0, errors };
+}
+
 export function validatePitch(input: {
   pitch: string;
   postingText: string;
@@ -24,23 +33,35 @@ export function validatePitch(input: {
   if (!input.pitch.includes(SEBE_DISCLOSURE)) {
     errors.push(`Pitch must include the disclosure line exactly: ${SEBE_DISCLOSURE}`);
   }
-  if (VISA_TERMS.test(prose)) {
-    errors.push("Pitch must not mention visas, sponsorship, residency, or work rights");
+  errors.push(...guardedContentErrors(prose, input.postingText, "Pitch"));
+
+  return { valid: errors.length === 0, errors };
+}
+
+function guardedContentErrors(
+  value: string,
+  postingText: string,
+  label: "Pitch" | "Subject",
+): string[] {
+  const errors: string[] = [];
+
+  if (VISA_TERMS.test(value)) {
+    errors.push(`${label} must not mention visas, sponsorship, residency, or work rights`);
   }
-  if (POSTED_PAY_CLAIM.test(prose)) {
-    errors.push("Pitch must not characterize pay as posted, advertised, listed, or stated");
+  if (POSTED_PAY_CLAIM.test(value)) {
+    errors.push(`${label} must not characterize pay as posted, advertised, listed, or stated`);
   }
 
-  const posting = normalizePayText(input.postingText);
-  for (const match of prose.matchAll(PAY_FACT)) {
+  const posting = normalizePayText(postingText);
+  for (const match of value.matchAll(PAY_FACT)) {
     const fact = normalizePayText(match[0]);
 
     if (!posting.includes(fact)) {
-      errors.push(`Pitch includes a pay fact absent from the posting: ${match[0]}`);
+      errors.push(`${label} includes a pay fact absent from the posting: ${match[0]}`);
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  return errors;
 }
 
 function normalizePayText(value: string): string {
