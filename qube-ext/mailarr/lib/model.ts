@@ -7,24 +7,7 @@ export const ITEM_STAGES = [
 ] as const;
 
 export type ItemStage = (typeof ITEM_STAGES)[number];
-export type ItemOrigin = "scan" | "intake";
 export type RunStatus = "pending" | "running" | "done" | "failed";
-
-export interface NormalizedPosting {
-  company: string;
-  role: string;
-  rateInfo: string;
-  source: string;
-  url: string;
-  description: string;
-  publishedAt: string | null;
-  payload: unknown;
-}
-
-export interface SourceResult {
-  source: string;
-  postings: NormalizedPosting[];
-}
 
 export interface Routine {
   id: number;
@@ -32,9 +15,22 @@ export interface Routine {
   cron: string;
   orderText: string;
   dailyCap: number;
-  sources: string[] | null;
+  verbatimTerms: string;
+  blockedTopics: string[];
+  requiredDisclosure: string | null;
+  keywords: Record<string, number> | null;
+  scoreFloor: number | null;
   enabled: boolean;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoutineSource {
+  routineId: number;
+  name: string;
+  url: string;
+  notes: string;
+  addedAt: string;
   updatedAt: string;
 }
 
@@ -62,7 +58,6 @@ export interface Item {
   role: string;
   rateInfo: string;
   source: string;
-  origin: ItemOrigin;
   url: string;
   contactEmail: string | null;
   score: number;

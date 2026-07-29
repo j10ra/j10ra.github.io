@@ -2,22 +2,32 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ExtensionContext } from "@qube-code/extension-sdk";
 import { z } from "zod";
 import {
+  addSource,
   finishRun,
   getItem,
   getRoutine,
   listItems,
   listPendingRuns,
+  listSources,
   openMailarrDatabase,
+  removeSource,
   saveBriefing,
   startRun,
   updateItem,
+  updateRoutine,
+  updateSource,
 } from "./lib/db.js";
+import { addItems } from "./lib/intake.js";
 import { ITEM_STAGES } from "./lib/model.js";
-import { addItems, scanSources } from "./lib/scan.js";
 import { sendFirstContact } from "./lib/send.js";
 
 const text = (value: unknown) => ({
-  content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+  content: [
+    {
+      type: "text" as const,
+      text: typeof value === "string" ? value : JSON.stringify(value, null, 2),
+    },
+  ],
 });
 const fail = (error: unknown) => ({
   content: [{ type: "text" as const, text: `Error: ${message(error)}` }],
@@ -27,21 +37,33 @@ const fail = (error: unknown) => ({
 export const MAILARR_INSTRUCTIONS = [
   "# Mailarr",
   "",
-  "Mailarr owns Sebe's outreach pipeline. On a scheduler nudge, or when polling for work:",
+  "Mailarr is a generic guarded first-contact mailer. On a scheduler nudge, or when polling:",
   "",
   "1. Call routines_due.",
   "2. For each pending run, call routine_get and follow its order_text.",
-  "3. Call run_start, then scan_sources.",
-  "4. If the order names sources beyond the built-ins, fetch them and submit leads with items_add.",
-  "5. Page through items_list, qualify with item_update, and write one pitch per qualified lead.",
-  "6. Call send_first_contact for the top qualified items until the routine cap is reached.",
-  "7. Call post_briefing with counts, company names, notable drops, and source errors.",
-  "8. Call run_finish.",
+  "3. Call run_start.",
+  "4. Manage routine sources when the order requests it, then fetch them yourself.",
+  "5. Submit fetched contacts with items_add.",
+  "6. Page through items_list and qualify with item_update.",
+  "7. Draft one message per qualified contact using the routine disclosure and {{TERMS}} once.",
+  "8. Call send_first_contact until the routine cap is reached.",
+  "9. Call post_briefing, then run_finish.",
   "",
-  "Use the commercial terms token exactly once in every draft. The send tool replaces it with",
-  "settings-controlled terms, validates the pitch, enforces the daily cap and permanent company",
-  "dedupe, then either records a dry run or sends through SMTP.",
+  "The send tool is the only mail egress. It inserts routine-owned terms verbatim and enforces",
+  "content validation, recipient matching, the daily cap, permanent company dedupe, and dry-run mode.",
 ].join("\n");
+
+const routineFields = {
+  name: z.string().min(1).optional(),
+  cron: z.string().min(1).optional(),
+  order_text: z.string().min(1).optional(),
+  daily_cap: z.number().int().positive().optional(),
+  verbatim_terms: z.string().min(1).optional(),
+  blocked_topics: z.array(z.string().min(1)).optional(),
+  required_disclosure: z.string().nullable().optional(),
+  keywords: z.record(z.number()).nullable().optional(),
+  score_floor: z.number().int().nullable().optional(),
+};
 
 export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
   const server = new McpServer(
@@ -58,10 +80,120 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
   server.registerTool(
     "routine_get",
     {
-      description: "Read a routine, including the order_text the agent must follow.",
+      description:
+        "Read a routine's order, cap, terms, validation content, scoring rules, and sources.",
       inputSchema: { routine_id: z.number().int().positive() },
     },
-    ({ routine_id }) => withDb(ctx, (db) => getRoutine(db, routine_id)),
+    ({ routine_id }) =>
+      withDb(ctx, (db) => ({
+        ...getRoutine(db, routine_id),
+        sources: listSources(db, routine_id),
+      })),
+  );
+
+  server.registerTool(
+    "routine_update",
+    {
+      description:
+        "Update routine-owned instructions, guards, terms, cap, or optional scoring rules.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        ...routineFields,
+      },
+    },
+    ({ routine_id, ...patch }) =>
+      withDb(
+        ctx,
+        (db) => {
+          const current = getRoutine(db, routine_id);
+
+          return updateRoutine(db, routine_id, {
+            name: patch.name ?? current.name,
+            cron: patch.cron ?? current.cron,
+            orderText: patch.order_text ?? current.orderText,
+            dailyCap: patch.daily_cap ?? current.dailyCap,
+            verbatimTerms: patch.verbatim_terms ?? current.verbatimTerms,
+            blockedTopics: patch.blocked_topics ?? current.blockedTopics,
+            requiredDisclosure:
+              patch.required_disclosure === undefined
+                ? current.requiredDisclosure
+                : patch.required_disclosure,
+            keywords:
+              patch.keywords === undefined ? current.keywords : patch.keywords,
+            scoreFloor:
+              patch.score_floor === undefined ? current.scoreFloor : patch.score_floor,
+          });
+        },
+        true,
+      ),
+  );
+
+  server.registerTool(
+    "sources_list",
+    {
+      description: "List agent-managed sources for a routine.",
+      inputSchema: { routine_id: z.number().int().positive() },
+    },
+    ({ routine_id }) => withDb(ctx, (db) => listSources(db, routine_id)),
+  );
+
+  server.registerTool(
+    "source_add",
+    {
+      description: "Add a source to a routine.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        name: z.string().min(1),
+        url: z.string().url(),
+        notes: z.string().optional(),
+      },
+    },
+    ({ routine_id, name, url, notes }) =>
+      withDb(
+        ctx,
+        (db) => addSource(db, { routineId: routine_id, name, url, notes }),
+        true,
+      ),
+  );
+
+  server.registerTool(
+    "source_update",
+    {
+      description: "Update a routine source identified by its current name.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        name: z.string().min(1),
+        new_name: z.string().min(1).optional(),
+        url: z.string().url().optional(),
+        notes: z.string().optional(),
+      },
+    },
+    ({ routine_id, name, new_name, url, notes }) =>
+      withDb(
+        ctx,
+        (db) =>
+          updateSource(db, {
+            routineId: routine_id,
+            name,
+            newName: new_name,
+            url,
+            notes,
+          }),
+        true,
+      ),
+  );
+
+  server.registerTool(
+    "source_remove",
+    {
+      description: "Remove a source from a routine.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        name: z.string().min(1),
+      },
+    },
+    ({ routine_id, name }) =>
+      withDb(ctx, (db) => removeSource(db, routine_id, name), true),
   );
 
   server.registerTool(
@@ -89,23 +221,10 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
   );
 
   server.registerTool(
-    "scan_sources",
-    {
-      description:
-        "Fetch the routine's enabled built-in sources, score full descriptions, extract " +
-        "apply-context emails, drop below-floor posts, and store discovered items. " +
-        "Individual source failures are recorded.",
-      inputSchema: { run_id: z.number().int().positive() },
-    },
-    ({ run_id }) => withDb(ctx, (db) => scanSources(db, run_id), true),
-  );
-
-  server.registerTool(
     "items_add",
     {
       description:
-        "Submit agent-fetched leads through Mailarr's guarded intake. Items are scored, " +
-        "deduplicated, email-filtered, and stored at discovered for the current run.",
+        "Submit agent-fetched contacts through Mailarr intake. Routine scoring is applied only when configured.",
       inputSchema: {
         routine_id: z.number().int().positive(),
         run_id: z.number().int().positive(),
@@ -176,7 +295,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "item_update",
     {
       description:
-        "Move an item through the pipeline and attach fit notes, a draft pitch, contact email, or drop reason.",
+        "Move an item through the pipeline and attach notes, a draft, contact email, or drop reason.",
       inputSchema: {
         item_id: z.number().int().positive(),
         stage: z.enum(ITEM_STAGES).optional(),
@@ -205,8 +324,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "send_first_contact",
     {
       description:
-        "Guarded first-contact send. Requires a qualified item and a draft containing " +
-        "{{COMMERCIAL_TERMS}} exactly once.",
+        "The only mail egress. Requires a qualified item and a draft containing {{TERMS}} exactly once.",
       inputSchema: {
         run_id: z.number().int().positive(),
         item_id: z.number().int().positive(),
@@ -221,10 +339,9 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         const db = openMailarrDatabase(current.dataDir);
         try {
           const item = getItem(db, item_id);
-          const [smtpUser, smtpPassword, fromAddress] = await Promise.all([
+          const [smtpUser, smtpPassword] = await Promise.all([
             current.secrets.get("smtp_user"),
             current.secrets.get("smtp_password"),
-            current.secrets.get("from_address"),
           ]);
           const result = await sendFirstContact({
             db,
@@ -233,16 +350,12 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
             to: to ?? item.contactEmail ?? "",
             subject,
             draft: pitch,
-            commercial: {
-              hourlyFloor: configString(current.config, "hourly_floor"),
-              targetRate: configString(current.config, "target_rate"),
-              premiumBand: configString(current.config, "premium_band"),
-              weeklyHours: configString(current.config, "weekly_hours"),
-            },
             smtp: {
+              host: configString(current.config, "smtp_host"),
+              port: configPort(current.config),
               user: smtpUser ?? "",
               password: smtpPassword ?? "",
-              fromAddress: fromAddress ?? "",
+              fromAddress: configString(current.config, "from_address"),
             },
             dryRun: dryRunEnabled(current.config),
           });
@@ -309,6 +422,12 @@ function configString(config: Record<string, unknown>, key: string): string {
   const value = config[key];
 
   return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function configPort(config: Record<string, unknown>): number {
+  const value = Number(config.smtp_port);
+
+  return Number.isInteger(value) ? value : 0;
 }
 
 export function dryRunEnabled(config: Record<string, unknown>): boolean {

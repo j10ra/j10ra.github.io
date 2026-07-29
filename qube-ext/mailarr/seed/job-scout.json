@@ -1,0 +1,30 @@
+{
+  "routine": {
+    "name": "Job Scout",
+    "cron": "0 9 * * *",
+    "orderText": "Refresh the routine sources with the source tools. Fetch each source and submit every candidate through items_add. Read each full description and qualify only senior React, TypeScript, or full-stack opportunities, preferring AI, agent, and MCP work. Apply the commercial floor defined in this order before qualifying. Draft one honest first-contact message for each qualified lead, include the required disclosure and {{TERMS}} exactly once, then send until the routine cap is reached. Post a briefing with intake, qualification, send, drop, and error details before finishing the run.",
+    "dailyCap": 5,
+    "verbatimTerms": "[Configure the commercial terms for this routine before sending.]",
+    "blockedTopics": [
+      "visa",
+      "sponsorship",
+      "residency",
+      "work rights",
+      "work permit"
+    ],
+    "requiredDisclosure": "I’m Sebe, an AI assistant working with Jetz Alipalo.",
+    "keywords": null,
+    "scoreFloor": null,
+    "enabled": false
+  },
+  "sentHistory": [
+    {
+      "company": "Faithlife",
+      "contactedAt": "2026-07-28T00:00:00.000Z"
+    },
+    {
+      "company": "Very Real Help",
+      "contactedAt": "2026-07-28T00:00:00.000Z"
+    }
+  ]
+}

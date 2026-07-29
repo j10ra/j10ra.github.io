@@ -8,12 +8,6 @@
   "capabilities": [
     "storage",
     "secrets",
-    "http:remoteok.com",
-    "http:remotive.com",
-    "http:weworkremotely.com",
-    "http:www.arbeitnow.com",
-    "http:jobicy.com",
-    "http:hn.algolia.com",
-    "http:smtp.gmail.com"
+    "smtp"
   ]
 }

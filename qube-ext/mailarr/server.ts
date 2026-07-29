@@ -16,29 +16,9 @@ export default defineExtension({
   id: "mailarr",
   settings: [
     {
-      id: "commercial",
-      title: "Commercial terms",
+      id: "delivery",
+      title: "Delivery",
       fields: [
-        {
-          key: "hourly_floor",
-          label: "Hourly floor",
-          placeholder: "Required amount and currency",
-        },
-        {
-          key: "target_rate",
-          label: "Target rate",
-          placeholder: "Required amount and currency",
-        },
-        {
-          key: "premium_band",
-          label: "Premium band",
-          placeholder: "Required range and currency",
-        },
-        {
-          key: "weekly_hours",
-          label: "Weekly hours",
-          placeholder: "Required weekly availability",
-        },
         {
           key: "dry_run",
           label: "Dry run",
@@ -51,15 +31,27 @@ export default defineExtension({
       title: "SMTP",
       fields: [
         {
+          key: "smtp_host",
+          label: "Host",
+          required: true,
+          placeholder: "SMTP server hostname",
+        },
+        {
+          key: "smtp_port",
+          label: "TLS port",
+          required: true,
+          placeholder: "465",
+        },
+        {
           key: "smtp_user",
-          label: "Gmail SMTP user",
+          label: "Username",
           required: true,
           secret: true,
           placeholder: "Stored securely at runtime",
         },
         {
           key: "smtp_password",
-          label: "Gmail app password",
+          label: "Password",
           required: true,
           secret: true,
           placeholder: "Stored securely at runtime",
@@ -68,8 +60,7 @@ export default defineExtension({
           key: "from_address",
           label: "From address",
           required: true,
-          secret: true,
-          placeholder: "Stored securely at runtime",
+          placeholder: "sender@example.com",
         },
       ],
     },

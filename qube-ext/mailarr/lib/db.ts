@@ -1,25 +1,34 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   Item,
-  ItemOrigin,
   ItemStage,
-  NormalizedPosting,
   Routine,
+  RoutineSource,
   Run,
   RunStatus,
 } from "./model.js";
 
-const JOB_SCOUT_ORDER = [
-  "Scan every configured source.",
-  "Qualify against the full description for senior React, TypeScript, or full-stack work.",
-  "Prefer AI, agent, and MCP work.",
-  "Compose one Sebe-persona pitch per qualified lead.",
-  "Send the top qualified leads until the daily cap is reached.",
-  "Post a briefing with found, qualified, and sent counts, company names, notable drops, and errors.",
-].join(" ");
+interface SeedData {
+  routine: {
+    name: string;
+    cron: string;
+    orderText: string;
+    dailyCap: number;
+    verbatimTerms: string;
+    blockedTopics: string[];
+    requiredDisclosure: string | null;
+    keywords: Record<string, number> | null;
+    scoreFloor: number | null;
+    enabled: boolean;
+  };
+  sentHistory: Array<{ company: string; contactedAt: string }>;
+}
 
+const seedData = JSON.parse(
+  readFileSync(new URL("../seed/job-scout.json", import.meta.url), "utf8"),
+) as SeedData;
 const nowIso = () => new Date().toISOString();
 
 export function normalizeCompany(company: string): string {
@@ -36,29 +45,52 @@ export function openMailarrDatabase(dataDir: string): DatabaseSync {
 
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
-  migrate(db);
+  initializeSchema(db);
 
   return db;
 }
 
-export function migrate(db: DatabaseSync): void {
-  const versionRow = db.prepare("PRAGMA user_version").get() as { user_version: number };
-  const version = Number(versionRow.user_version);
+export function initializeSchema(db: DatabaseSync): void {
+  const version = Number(
+    (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+  );
+
+  if (version === 1) return;
+  if (version !== 0) {
+    throw new Error(`Unsupported Mailarr schema version ${version}; create a fresh database`);
+  }
 
   db.exec(`
-    CREATE TABLE IF NOT EXISTS routines (
+    BEGIN IMMEDIATE;
+
+    CREATE TABLE routines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       cron TEXT NOT NULL,
       order_text TEXT NOT NULL,
       daily_cap INTEGER NOT NULL CHECK (daily_cap > 0),
-      sources TEXT,
+      verbatim_terms TEXT NOT NULL,
+      blocked_topics TEXT NOT NULL DEFAULT '[]',
+      required_disclosure TEXT,
+      keywords TEXT,
+      score_floor INTEGER,
       enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      CHECK (keywords IS NOT NULL OR score_floor IS NULL)
     );
 
-    CREATE TABLE IF NOT EXISTS runs (
+    CREATE TABLE sources (
+      routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      added_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (routine_id, name)
+    );
+
+    CREATE TABLE runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
       started_at TEXT,
@@ -73,7 +105,7 @@ export function migrate(db: DatabaseSync): void {
       UNIQUE (routine_id, scheduled_for)
     );
 
-    CREATE TABLE IF NOT EXISTS items (
+    CREATE TABLE items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
       run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -83,7 +115,6 @@ export function migrate(db: DatabaseSync): void {
       role TEXT NOT NULL,
       rate_info TEXT NOT NULL DEFAULT '',
       source TEXT NOT NULL,
-      origin TEXT NOT NULL DEFAULT 'scan' CHECK (origin IN ('scan', 'intake')),
       url TEXT NOT NULL,
       contact_email TEXT,
       score INTEGER NOT NULL DEFAULT 0,
@@ -94,10 +125,10 @@ export function migrate(db: DatabaseSync): void {
       payload_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      UNIQUE (normalized_company, url)
+      UNIQUE (routine_id, normalized_company, url)
     );
 
-    CREATE TABLE IF NOT EXISTS sent_log (
+    CREATE TABLE sent_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company TEXT NOT NULL,
       normalized_company TEXT NOT NULL,
@@ -109,136 +140,85 @@ export function migrate(db: DatabaseSync): void {
       dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1))
     );
 
-    CREATE TABLE IF NOT EXISTS briefings (
+    CREATE TABLE briefings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
       markdown_body TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
 
-  `);
-  if (version < 1) seedInitialData(db);
-  if (version < 2) migrateLegacySentLog(db);
-  if (version < 3) migrateRoutineSources(db);
-  if (version < 4) migrateItemOrigins(db);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
-    CREATE INDEX IF NOT EXISTS items_run_stage_idx ON items(run_id, stage);
-    CREATE INDEX IF NOT EXISTS sent_log_sent_at_idx ON sent_log(sent_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS sent_log_real_company_idx
+    CREATE INDEX runs_status_idx ON runs(status);
+    CREATE INDEX items_run_stage_idx ON items(run_id, stage);
+    CREATE INDEX sent_log_sent_at_idx ON sent_log(sent_at);
+    CREATE UNIQUE INDEX sent_log_real_company_idx
       ON sent_log(normalized_company)
       WHERE dry_run = 0;
   `);
 
-  db.exec("PRAGMA user_version = 4");
-}
-
-function migrateRoutineSources(db: DatabaseSync): void {
-  const columns = db.prepare("PRAGMA table_info(routines)").all() as Array<{ name: string }>;
-
-  if (!columns.some((column) => column.name === "sources")) {
-    db.exec("ALTER TABLE routines ADD COLUMN sources TEXT");
-  }
-}
-
-function migrateItemOrigins(db: DatabaseSync): void {
-  const columns = db.prepare("PRAGMA table_info(items)").all() as Array<{ name: string }>;
-
-  if (!columns.some((column) => column.name === "origin")) {
-    db.exec(`
-      ALTER TABLE items
-      ADD COLUMN origin TEXT NOT NULL DEFAULT 'scan'
-        CHECK (origin IN ('scan', 'intake'))
-    `);
-  }
-}
-
-function migrateLegacySentLog(db: DatabaseSync): void {
-  const row = db
-    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sent_log'")
-    .get() as { sql?: string } | undefined;
-
-  if (!row?.sql || !/normalized_company\s+TEXT\s+NOT NULL\s+UNIQUE/iu.test(row.sql)) return;
-
-  db.exec("PRAGMA foreign_keys = OFF");
   try {
-    db.exec(`
-      BEGIN IMMEDIATE;
-      CREATE TABLE sent_log_next (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        company TEXT NOT NULL,
-        normalized_company TEXT NOT NULL,
-        email TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        body TEXT NOT NULL,
-        sent_at TEXT NOT NULL,
-        run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
-        dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1))
-      );
-      INSERT INTO sent_log_next
-        (id, company, normalized_company, email, subject, body, sent_at, run_id, dry_run)
-      SELECT id, company, normalized_company, email, subject, body, sent_at, run_id, dry_run
-      FROM sent_log;
-      DROP TABLE sent_log;
-      ALTER TABLE sent_log_next RENAME TO sent_log;
-      COMMIT;
-    `);
+    seedInitialData(db);
+    db.exec("PRAGMA user_version = 1; COMMIT");
   } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
+    db.exec("ROLLBACK");
     throw error;
-  } finally {
-    db.exec("PRAGMA foreign_keys = ON");
   }
 }
 
 function seedInitialData(db: DatabaseSync): void {
   const seededAt = "2026-07-28T00:00:00.000Z";
+  const routine = seedData.routine;
 
   db.prepare(`
-    INSERT OR IGNORE INTO routines
-      (name, cron, order_text, daily_cap, enabled, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 0, ?, ?)
-  `).run("Job Scout", "0 9 * * *", JOB_SCOUT_ORDER, 5, seededAt, seededAt);
-  const seedSent = db.prepare(`
-    INSERT OR IGNORE INTO sent_log
+    INSERT INTO routines (
+      name, cron, order_text, daily_cap, verbatim_terms, blocked_topics,
+      required_disclosure, keywords, score_floor, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    routine.name,
+    routine.cron,
+    routine.orderText,
+    routine.dailyCap,
+    routine.verbatimTerms,
+    JSON.stringify(routine.blockedTopics),
+    routine.requiredDisclosure,
+    serializeKeywords(routine.keywords),
+    routine.scoreFloor,
+    routine.enabled ? 1 : 0,
+    seededAt,
+    seededAt,
+  );
+
+  const insertHistory = db.prepare(`
+    INSERT INTO sent_log
       (company, normalized_company, email, subject, body, sent_at, run_id, dry_run)
     VALUES (?, ?, '', 'Imported contact record', '', ?, NULL, 0)
   `);
 
-  for (const company of ["Faithlife", "Very Real Help"]) {
-    seedSent.run(company, normalizeCompany(company), seededAt);
+  for (const entry of seedData.sentHistory) {
+    insertHistory.run(entry.company, normalizeCompany(entry.company), entry.contactedAt);
   }
 }
 
-export function createRoutine(
-  db: DatabaseSync,
-  input: {
-    name: string;
-    cron: string;
-    orderText: string;
-    dailyCap: number;
-    sources?: string[] | null;
-  },
-): Routine {
+export interface RoutineInput {
+  name: string;
+  cron: string;
+  orderText: string;
+  dailyCap: number;
+  verbatimTerms: string;
+  blockedTopics: string[];
+  requiredDisclosure: string | null;
+  keywords: Record<string, number> | null;
+  scoreFloor: number | null;
+}
+
+export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
   const at = nowIso();
-  const result = db
-    .prepare(`
-      INSERT INTO routines
-        (name, cron, order_text, daily_cap, sources, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-    `)
-    .run(
-      input.name.trim(),
-      input.cron.trim(),
-      input.orderText.trim(),
-      input.dailyCap,
-      serializeSources(input.sources),
-      at,
-      at,
-    );
+  const result = db.prepare(`
+    INSERT INTO routines (
+      name, cron, order_text, daily_cap, verbatim_terms, blocked_topics,
+      required_disclosure, keywords, score_floor, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(...routineValues(input), at, at);
 
   return getRoutine(db, Number(result.lastInsertRowid));
 }
@@ -246,36 +226,65 @@ export function createRoutine(
 export function updateRoutine(
   db: DatabaseSync,
   id: number,
-  input: {
-    name: string;
-    cron: string;
-    orderText: string;
-    dailyCap: number;
-    sources?: string[] | null;
-  },
+  input: RoutineInput,
 ): Routine {
-  const result = db
-    .prepare(`
-      UPDATE routines
-      SET name = ?, cron = ?, order_text = ?, daily_cap = ?, sources = ?, updated_at = ?
-      WHERE id = ?
-    `)
-    .run(
-      input.name.trim(),
-      input.cron.trim(),
-      input.orderText.trim(),
-      input.dailyCap,
-      serializeSources(input.sources),
-      nowIso(),
-      id,
-    );
+  const result = db.prepare(`
+    UPDATE routines
+    SET name = ?, cron = ?, order_text = ?, daily_cap = ?, verbatim_terms = ?,
+        blocked_topics = ?, required_disclosure = ?, keywords = ?, score_floor = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(...routineValues(input), nowIso(), id);
 
   if (result.changes === 0) throw new Error(`routine ${id} not found`);
 
   return getRoutine(db, id);
 }
 
-export function setRoutineEnabled(db: DatabaseSync, id: number, enabled: boolean): Routine {
+function routineValues(input: RoutineInput): Array<string | number | null> {
+  validateRoutineInput(input);
+
+  return [
+    input.name.trim(),
+    input.cron.trim(),
+    input.orderText.trim(),
+    input.dailyCap,
+    input.verbatimTerms,
+    JSON.stringify(uniqueTerms(input.blockedTopics)),
+    trimmedOrNull(input.requiredDisclosure),
+    serializeKeywords(input.keywords),
+    input.keywords === null ? null : input.scoreFloor,
+  ];
+}
+
+function validateRoutineInput(input: RoutineInput): void {
+  if (!input.name.trim()) throw new Error("routine name is required");
+  if (!input.cron.trim()) throw new Error("routine cron is required");
+  if (!input.orderText.trim()) throw new Error("routine order is required");
+  if (!Number.isInteger(input.dailyCap) || input.dailyCap <= 0) {
+    throw new Error("routine daily cap must be a positive integer");
+  }
+  if (!input.verbatimTerms.trim()) throw new Error("routine verbatim terms are required");
+  if (
+    input.scoreFloor !== null &&
+    (!Number.isFinite(input.scoreFloor) || !Number.isInteger(input.scoreFloor))
+  ) {
+    throw new Error("routine score floor must be an integer or null");
+  }
+  if (input.keywords) {
+    for (const [term, weight] of Object.entries(input.keywords)) {
+      if (!term.trim() || !Number.isFinite(weight)) {
+        throw new Error("routine keywords must map non-empty terms to numeric weights");
+      }
+    }
+  }
+}
+
+export function setRoutineEnabled(
+  db: DatabaseSync,
+  id: number,
+  enabled: boolean,
+): Routine {
   const result = db
     .prepare("UPDATE routines SET enabled = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nowIso(), id);
@@ -294,7 +303,9 @@ export function getRoutine(db: DatabaseSync, id: number): Routine {
 }
 
 export function listRoutines(db: DatabaseSync): Routine[] {
-  return (db.prepare("SELECT * FROM routines ORDER BY name").all() as DbRow[]).map(routineFromRow);
+  return (db.prepare("SELECT * FROM routines ORDER BY name").all() as DbRow[]).map(
+    routineFromRow,
+  );
 }
 
 export function listEnabledRoutines(db: DatabaseSync): Routine[] {
@@ -303,19 +314,98 @@ export function listEnabledRoutines(db: DatabaseSync): Routine[] {
   ).map(routineFromRow);
 }
 
+export function listSources(db: DatabaseSync, routineId: number): RoutineSource[] {
+  getRoutine(db, routineId);
+
+  return (
+    db
+      .prepare("SELECT * FROM sources WHERE routine_id = ? ORDER BY name")
+      .all(routineId) as DbRow[]
+  ).map(sourceFromRow);
+}
+
+export function addSource(
+  db: DatabaseSync,
+  input: { routineId: number; name: string; url: string; notes?: string },
+): RoutineSource {
+  getRoutine(db, input.routineId);
+  const at = nowIso();
+
+  db.prepare(`
+    INSERT INTO sources (routine_id, name, url, notes, added_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    input.routineId,
+    requiredText(input.name, "source name"),
+    requiredText(input.url, "source url"),
+    input.notes?.trim() ?? "",
+    at,
+    at,
+  );
+
+  return getSource(db, input.routineId, input.name);
+}
+
+export function updateSource(
+  db: DatabaseSync,
+  input: {
+    routineId: number;
+    name: string;
+    newName?: string;
+    url?: string;
+    notes?: string;
+  },
+): RoutineSource {
+  const current = getSource(db, input.routineId, input.name);
+  const nextName =
+    input.newName === undefined ? current.name : requiredText(input.newName, "source name");
+  const nextUrl = input.url === undefined ? current.url : requiredText(input.url, "source url");
+  const nextNotes = input.notes === undefined ? current.notes : input.notes.trim();
+  const result = db.prepare(`
+    UPDATE sources
+    SET name = ?, url = ?, notes = ?, updated_at = ?
+    WHERE routine_id = ? AND name = ?
+  `).run(nextName, nextUrl, nextNotes, nowIso(), input.routineId, input.name);
+
+  if (result.changes === 0) throw new Error(`source ${input.name} not found`);
+
+  return getSource(db, input.routineId, nextName);
+}
+
+export function removeSource(
+  db: DatabaseSync,
+  routineId: number,
+  name: string,
+): { removed: true; routineId: number; name: string } {
+  const result = db
+    .prepare("DELETE FROM sources WHERE routine_id = ? AND name = ?")
+    .run(routineId, name);
+
+  if (result.changes === 0) throw new Error(`source ${name} not found`);
+
+  return { removed: true, routineId, name };
+}
+
+function getSource(db: DatabaseSync, routineId: number, name: string): RoutineSource {
+  const row = db
+    .prepare("SELECT * FROM sources WHERE routine_id = ? AND name = ?")
+    .get(routineId, name.trim()) as DbRow | undefined;
+
+  if (!row) throw new Error(`source ${name} not found`);
+
+  return sourceFromRow(row);
+}
+
 export function createRun(
   db: DatabaseSync,
   routineId: number,
   scheduledFor: string | null = null,
 ): Run {
   getRoutine(db, routineId);
-  const result = db
-    .prepare(`
-      INSERT OR IGNORE INTO runs
-        (routine_id, created_at, scheduled_for, status)
-      VALUES (?, ?, ?, 'pending')
-    `)
-    .run(routineId, nowIso(), scheduledFor);
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO runs (routine_id, created_at, scheduled_for, status)
+    VALUES (?, ?, ?, 'pending')
+  `).run(routineId, nowIso(), scheduledFor);
 
   if (result.changes === 0 && scheduledFor) {
     const existing = db
@@ -336,28 +426,26 @@ export function getRun(db: DatabaseSync, id: number): Run {
   return runFromRow(row);
 }
 
-export function listPendingRuns(db: DatabaseSync): Array<Run & { routineName: string }> {
+export function listPendingRuns(
+  db: DatabaseSync,
+): Array<Run & { routineName: string }> {
   return (
-    db
-      .prepare(`
-        SELECT runs.*, routines.name AS routine_name
-        FROM runs
-        JOIN routines ON routines.id = runs.routine_id
-        WHERE runs.status = 'pending'
-        ORDER BY runs.created_at
-      `)
-      .all() as DbRow[]
+    db.prepare(`
+      SELECT runs.*, routines.name AS routine_name
+      FROM runs
+      JOIN routines ON routines.id = runs.routine_id
+      WHERE runs.status = 'pending'
+      ORDER BY runs.created_at
+    `).all() as DbRow[]
   ).map((row) => ({ ...runFromRow(row), routineName: String(row.routine_name) }));
 }
 
 export function startRun(db: DatabaseSync, id: number): Run {
-  const result = db
-    .prepare(`
-      UPDATE runs
-      SET status = 'running', started_at = COALESCE(started_at, ?), finished_at = NULL
-      WHERE id = ? AND status = 'pending'
-    `)
-    .run(nowIso(), id);
+  const result = db.prepare(`
+    UPDATE runs
+    SET status = 'running', started_at = COALESCE(started_at, ?), finished_at = NULL
+    WHERE id = ? AND status = 'pending'
+  `).run(nowIso(), id);
 
   if (result.changes === 0) {
     const run = getRun(db, id);
@@ -387,39 +475,13 @@ export function finishRun(
   }
 
   const finalStatus = current.status === "failed" ? "failed" : status;
-  const result = db
-    .prepare(`
-      UPDATE runs
-      SET status = ?, finished_at = ?, error_text = COALESCE(?, error_text)
-      WHERE id = ? AND status IN ('running', 'failed')
-    `)
-    .run(finalStatus, nowIso(), errorText ?? null, id);
+  const result = db.prepare(`
+    UPDATE runs
+    SET status = ?, finished_at = ?, error_text = COALESCE(?, error_text)
+    WHERE id = ? AND status IN ('running', 'failed')
+  `).run(finalStatus, nowIso(), errorText ?? null, id);
 
   if (result.changes === 0) throw new Error(`run ${id} is not active`);
-
-  return getRun(db, id);
-}
-
-export function recordScanResult(
-  db: DatabaseSync,
-  id: number,
-  foundCount: number,
-  errors: string[],
-  fullyFailed: boolean,
-): Run {
-  const errorText = errors.length ? errors.join("\n") : null;
-  const result = db
-    .prepare(`
-      UPDATE runs
-      SET found_count = found_count + ?,
-          error_text = ?,
-          status = CASE WHEN ? = 1 THEN 'failed' ELSE status END,
-          finished_at = CASE WHEN ? = 1 THEN ? ELSE finished_at END
-      WHERE id = ?
-    `)
-    .run(foundCount, errorText, fullyFailed ? 1 : 0, fullyFailed ? 1 : 0, nowIso(), id);
-
-  if (result.changes === 0) throw new Error(`run ${id} not found`);
 
   return getRun(db, id);
 }
@@ -438,124 +500,88 @@ export function incrementRunFoundCount(
   return getRun(db, id);
 }
 
-export function insertPosting(
+export interface IntakeRecord {
+  company: string;
+  role: string;
+  rateInfo: string;
+  source: string;
+  url: string;
+  description: string;
+  payload: unknown;
+}
+
+export function insertIntakeItem(
   db: DatabaseSync,
   routineId: number,
   runId: number,
-  posting: NormalizedPosting,
+  item: IntakeRecord,
   score: number,
   contactEmail: string | null,
-  origin: ItemOrigin = "scan",
 ): "inserted" | "refreshed" | "ignored" {
   const at = nowIso();
-  const normalizedCompany = normalizeCompany(posting.company);
-  const payload = {
-    raw: posting.payload,
-    description: posting.description,
-    publishedAt: posting.publishedAt,
-  };
-  const result = db
-    .prepare(`
-      INSERT OR IGNORE INTO items (
-        routine_id, run_id, stage, company, normalized_company, role, rate_info, source, origin,
-        url, contact_email, score, payload_json, created_at, updated_at
-      ) VALUES (?, ?, 'discovered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      routineId,
-      runId,
-      posting.company,
-      normalizedCompany,
-      posting.role,
-      posting.rateInfo,
-      posting.source,
-      origin,
-      posting.url,
-      contactEmail,
-      score,
-      JSON.stringify(payload),
-      at,
-      at,
-    );
+  const normalizedCompany = normalizeCompany(item.company);
+  const payload = JSON.stringify({ raw: item.payload, description: item.description });
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO items (
+      routine_id, run_id, stage, company, normalized_company, role, rate_info,
+      source, url, contact_email, score, payload_json, created_at, updated_at
+    ) VALUES (?, ?, 'discovered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    routineId,
+    runId,
+    item.company,
+    normalizedCompany,
+    item.role,
+    item.rateInfo,
+    item.source,
+    item.url,
+    contactEmail,
+    score,
+    payload,
+    at,
+    at,
+  );
 
   if (result.changes > 0) return "inserted";
 
-  const existing = db
-    .prepare(`
-      SELECT origin, payload_json
-      FROM items
-      WHERE normalized_company = ? AND url = ?
-    `)
-    .get(normalizedCompany, posting.url) as
-    | { origin: ItemOrigin; payload_json: string }
-    | undefined;
-
-  if (!existing) throw new Error("posting conflict could not be resolved");
-
-  const preserveScannedDescription = origin === "intake" && existing.origin === "scan";
-  const existingPayload = JSON.parse(existing.payload_json) as Record<string, unknown>;
-  const nextPayload = preserveScannedDescription
-    ? {
-        ...payload,
-        description:
-          typeof existingPayload.description === "string"
-            ? existingPayload.description
-            : "",
-      }
-    : payload;
-  const nextOrigin: ItemOrigin =
-    origin === "scan" || existing.origin === "scan" ? "scan" : "intake";
-  const refreshed = db
-    .prepare(`
-      UPDATE items
-      SET run_id = CASE WHEN routine_id = ? THEN ? ELSE run_id END,
-          company = ?,
-          role = ?,
-          rate_info = ?,
-          source = ?,
-          contact_email = COALESCE(?, contact_email),
-          score = ?,
-          origin = ?,
-          payload_json = ?,
-          updated_at = ?
-      WHERE normalized_company = ?
-        AND url = ?
-        AND stage IN ('discovered', 'qualified')
-    `)
-    .run(
-      routineId,
-      runId,
-      posting.company,
-      posting.role,
-      posting.rateInfo,
-      posting.source,
-      contactEmail,
-      score,
-      nextOrigin,
-      JSON.stringify(nextPayload),
-      at,
-      normalizedCompany,
-      posting.url,
-    );
+  const refreshed = db.prepare(`
+    UPDATE items
+    SET run_id = ?, company = ?, role = ?, rate_info = ?, source = ?,
+        contact_email = COALESCE(?, contact_email), score = ?, payload_json = ?,
+        updated_at = ?
+    WHERE routine_id = ? AND normalized_company = ? AND url = ?
+      AND stage IN ('discovered', 'qualified')
+  `).run(
+    runId,
+    item.company,
+    item.role,
+    item.rateInfo,
+    item.source,
+    contactEmail,
+    score,
+    payload,
+    at,
+    routineId,
+    normalizedCompany,
+    item.url,
+  );
 
   return refreshed.changes > 0 ? "refreshed" : "ignored";
 }
 
 export function getItem(db: DatabaseSync, id: number): Item {
-  const row = db
-    .prepare(`
-      SELECT items.*,
-        EXISTS (
-          SELECT 1
-          FROM sent_log
-          WHERE sent_log.run_id = items.run_id
-            AND sent_log.normalized_company = items.normalized_company
-            AND sent_log.dry_run = 1
-        ) AS contacted_dry_run
-      FROM items
-      WHERE items.id = ?
-    `)
-    .get(id) as DbRow | undefined;
+  const row = db.prepare(`
+    SELECT items.*,
+      EXISTS (
+        SELECT 1
+        FROM sent_log
+        WHERE sent_log.run_id = items.run_id
+          AND sent_log.normalized_company = items.normalized_company
+          AND sent_log.dry_run = 1
+      ) AS contacted_dry_run
+    FROM items
+    WHERE items.id = ?
+  `).get(id) as DbRow | undefined;
 
   if (!row) throw new Error(`item ${id} not found`);
 
@@ -564,44 +590,49 @@ export function getItem(db: DatabaseSync, id: number): Item {
 
 export function listItems(
   db: DatabaseSync,
-  input: { routineId?: number; runId?: number; stage?: ItemStage; page: number; pageSize: number },
+  input: {
+    routineId?: number;
+    runId?: number;
+    stage?: ItemStage;
+    page: number;
+    pageSize: number;
+  },
 ): { items: Item[]; total: number } {
   const filters: string[] = [];
   const params: Array<string | number> = [];
 
   if (input.routineId !== undefined) {
-    filters.push("routine_id = ?");
+    filters.push("items.routine_id = ?");
     params.push(input.routineId);
   }
   if (input.runId !== undefined) {
-    filters.push("run_id = ?");
+    filters.push("items.run_id = ?");
     params.push(input.runId);
   }
   if (input.stage) {
-    filters.push("stage = ?");
+    filters.push("items.stage = ?");
     params.push(input.stage);
   }
 
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const total = Number(
-    (db.prepare(`SELECT COUNT(*) AS count FROM items ${where}`).get(...params) as DbRow).count,
+    (db.prepare(`SELECT COUNT(*) AS count FROM items ${where}`).get(...params) as DbRow)
+      .count,
   );
-  const rows = db
-    .prepare(`
-      SELECT items.*,
-        EXISTS (
-          SELECT 1
-          FROM sent_log
-          WHERE sent_log.run_id = items.run_id
-            AND sent_log.normalized_company = items.normalized_company
-            AND sent_log.dry_run = 1
-        ) AS contacted_dry_run
-      FROM items
-      ${where}
-      ORDER BY created_at DESC, id DESC
-      LIMIT ? OFFSET ?
-    `)
-    .all(...params, input.pageSize, (input.page - 1) * input.pageSize) as DbRow[];
+  const rows = db.prepare(`
+    SELECT items.*,
+      EXISTS (
+        SELECT 1
+        FROM sent_log
+        WHERE sent_log.run_id = items.run_id
+          AND sent_log.normalized_company = items.normalized_company
+          AND sent_log.dry_run = 1
+      ) AS contacted_dry_run
+    FROM items
+    ${where}
+    ORDER BY items.created_at DESC, items.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, input.pageSize, (input.page - 1) * input.pageSize) as DbRow[];
 
   return { items: rows.map(itemFromRow), total };
 }
@@ -619,26 +650,20 @@ export function updateItem(
 ): Item {
   const before = getItem(db, id);
   const nextStage = input.stage ?? before.stage;
-  const result = db
-    .prepare(`
-      UPDATE items
-      SET stage = ?,
-          fit_notes = ?,
-          draft_pitch = ?,
-          drop_reason = ?,
-          contact_email = ?,
-          updated_at = ?
-      WHERE id = ?
-    `)
-    .run(
-      nextStage,
-      input.fitNotes === undefined ? before.fitNotes : input.fitNotes,
-      input.draftPitch === undefined ? before.draftPitch : input.draftPitch,
-      input.dropReason === undefined ? before.dropReason : input.dropReason,
-      input.contactEmail === undefined ? before.contactEmail : input.contactEmail,
-      nowIso(),
-      id,
-    );
+  const result = db.prepare(`
+    UPDATE items
+    SET stage = ?, fit_notes = ?, draft_pitch = ?, drop_reason = ?,
+        contact_email = ?, updated_at = ?
+    WHERE id = ?
+  `).run(
+    nextStage,
+    input.fitNotes === undefined ? before.fitNotes : input.fitNotes,
+    input.draftPitch === undefined ? before.draftPitch : input.draftPitch,
+    input.dropReason === undefined ? before.dropReason : input.dropReason,
+    input.contactEmail === undefined ? before.contactEmail : input.contactEmail,
+    nowIso(),
+    id,
+  );
 
   if (result.changes === 0) throw new Error(`item ${id} not found`);
   if (before.stage !== "qualified" && nextStage === "qualified") {
@@ -652,32 +677,30 @@ export function updateItem(
 
 export function saveBriefing(db: DatabaseSync, runId: number, markdown: string): void {
   const run = getRun(db, runId);
-  const sourceErrors =
+  const runErrors =
     run.errorText && !markdown.includes(run.errorText)
-      ? `\n\n## Source errors\n\n${run.errorText}`
+      ? `\n\n## Run errors\n\n${run.errorText}`
       : "";
 
   db.prepare(`
     INSERT INTO briefings (run_id, markdown_body, created_at)
     VALUES (?, ?, ?)
     ON CONFLICT(run_id) DO UPDATE SET markdown_body = excluded.markdown_body
-  `).run(runId, `${markdown.trim()}${sourceErrors}`, nowIso());
+  `).run(runId, `${markdown.trim()}${runErrors}`, nowIso());
 }
 
 export function latestBriefing(
   db: DatabaseSync,
   routineId: number,
 ): { runId: number; markdown: string; createdAt: string } | null {
-  const row = db
-    .prepare(`
-      SELECT briefings.run_id, briefings.markdown_body, briefings.created_at
-      FROM briefings
-      JOIN runs ON runs.id = briefings.run_id
-      WHERE runs.routine_id = ?
-      ORDER BY briefings.created_at DESC
-      LIMIT 1
-    `)
-    .get(routineId) as DbRow | undefined;
+  const row = db.prepare(`
+    SELECT briefings.run_id, briefings.markdown_body, briefings.created_at
+    FROM briefings
+    JOIN runs ON runs.id = briefings.run_id
+    WHERE runs.routine_id = ?
+    ORDER BY briefings.created_at DESC
+    LIMIT 1
+  `).get(routineId) as DbRow | undefined;
 
   return row
     ? {
@@ -688,19 +711,21 @@ export function latestBriefing(
     : null;
 }
 
-export function sentTodayCount(db: DatabaseSync, routineId: number, now = new Date()): number {
+export function sentTodayCount(
+  db: DatabaseSync,
+  routineId: number,
+  now = new Date(),
+): number {
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
   const end = new Date(start);
   end.setDate(end.getDate() + 1);
-  const row = db
-    .prepare(`
-      SELECT COUNT(*) AS count
-      FROM sent_log
-      JOIN runs ON runs.id = sent_log.run_id
-      WHERE runs.routine_id = ? AND sent_at >= ? AND sent_at < ?
-    `)
-    .get(routineId, start.toISOString(), end.toISOString()) as DbRow;
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM sent_log
+    JOIN runs ON runs.id = sent_log.run_id
+    WHERE runs.routine_id = ? AND sent_at >= ? AND sent_at < ?
+  `).get(routineId, start.toISOString(), end.toISOString()) as DbRow;
 
   return Number(row.count);
 }
@@ -744,17 +769,9 @@ export function recordSent(
     );
     db.prepare(`
       UPDATE items
-      SET stage = 'contacted',
-          sent_pitch = ?,
-          contact_email = ?,
-          updated_at = ?
+      SET stage = 'contacted', sent_pitch = ?, contact_email = ?, updated_at = ?
       WHERE id = ?
-    `).run(
-      input.body,
-      input.email,
-      input.sentAt,
-      input.itemId,
-    );
+    `).run(input.body, input.email, input.sentAt, input.itemId);
     db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
     db.exec("COMMIT");
   } catch (error) {
@@ -774,12 +791,11 @@ export function routineDashboard(db: DatabaseSync): Array<
     const lastRow = db
       .prepare("SELECT * FROM runs WHERE routine_id = ? ORDER BY created_at DESC LIMIT 1")
       .get(routine.id) as DbRow | undefined;
-    const leadRow = db
-      .prepare(`
-        SELECT COUNT(*) AS count FROM items
-        WHERE routine_id = ? AND stage IN ('discovered', 'qualified')
-      `)
-      .get(routine.id) as DbRow;
+    const leadRow = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM items
+      WHERE routine_id = ? AND stage IN ('discovered', 'qualified')
+    `).get(routine.id) as DbRow;
 
     return {
       ...routine,
@@ -790,7 +806,10 @@ export function routineDashboard(db: DatabaseSync): Array<
   });
 }
 
-export function pipelineCounts(db: DatabaseSync, routineId: number): Record<string, number> {
+export function pipelineCounts(
+  db: DatabaseSync,
+  routineId: number,
+): Record<string, number> {
   const counts: Record<string, number> = {
     all: 0,
     discovered: 0,
@@ -820,27 +839,26 @@ function routineFromRow(row: DbRow): Routine {
     cron: String(row.cron),
     orderText: String(row.order_text),
     dailyCap: Number(row.daily_cap),
-    sources: parseSources(row.sources),
+    verbatimTerms: String(row.verbatim_terms),
+    blockedTopics: parseStringArray(row.blocked_topics, "blocked topics"),
+    requiredDisclosure: row.required_disclosure ? String(row.required_disclosure) : null,
+    keywords: parseKeywords(row.keywords),
+    scoreFloor: row.score_floor === null ? null : Number(row.score_floor),
     enabled: Boolean(row.enabled),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
 }
 
-function serializeSources(sources: string[] | null | undefined): string | null {
-  return sources == null ? null : JSON.stringify([...new Set(sources)]);
-}
-
-function parseSources(value: DbRow[string]): string[] | null {
-  if (value == null) return null;
-
-  const parsed = JSON.parse(String(value)) as unknown;
-
-  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
-    throw new Error("routine sources must be a JSON string array");
-  }
-
-  return parsed;
+function sourceFromRow(row: DbRow): RoutineSource {
+  return {
+    routineId: Number(row.routine_id),
+    name: String(row.name),
+    url: String(row.url),
+    notes: String(row.notes),
+    addedAt: String(row.added_at),
+    updatedAt: String(row.updated_at),
+  };
 }
 
 function runFromRow(row: DbRow): Run {
@@ -870,7 +888,6 @@ function itemFromRow(row: DbRow): Item {
     role: String(row.role),
     rateInfo: String(row.rate_info),
     source: String(row.source),
-    origin: String(row.origin) as ItemOrigin,
     url: String(row.url),
     contactEmail: row.contact_email ? String(row.contact_email) : null,
     score: Number(row.score),
@@ -883,4 +900,60 @@ function itemFromRow(row: DbRow): Item {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function serializeKeywords(value: Record<string, number> | null): string | null {
+  if (value === null) return null;
+
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(value).map(([term, weight]) => [term.trim(), weight]),
+    ),
+  );
+}
+
+function parseKeywords(value: DbRow[string]): Record<string, number> | null {
+  if (value === null) return null;
+  const parsed = JSON.parse(String(value)) as unknown;
+
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    Object.entries(parsed).some(
+      ([term, weight]) => !term.trim() || typeof weight !== "number",
+    )
+  ) {
+    throw new Error("routine keywords must be a JSON term-to-weight map");
+  }
+
+  return parsed as Record<string, number>;
+}
+
+function parseStringArray(value: DbRow[string], field: string): string[] {
+  const parsed = JSON.parse(String(value)) as unknown;
+
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error(`routine ${field} must be a JSON string array`);
+  }
+
+  return parsed;
+}
+
+function uniqueTerms(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function trimmedOrNull(value: string | null): string | null {
+  const trimmed = value?.trim();
+
+  return trimmed ? trimmed : null;
+}
+
+function requiredText(value: string, field: string): string {
+  const trimmed = value.trim();
+
+  if (!trimmed) throw new Error(`${field} is required`);
+
+  return trimmed;
 }
