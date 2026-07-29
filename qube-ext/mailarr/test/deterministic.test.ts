@@ -28,6 +28,7 @@ import {
 } from "../lib/db.js";
 import { filterContactEmail } from "../lib/contact.js";
 import { addItems } from "../lib/intake.js";
+import type { SourceStatus } from "../lib/model.js";
 import { scoreText } from "../lib/score.js";
 import {
   enforceSendGuards,
@@ -146,6 +147,7 @@ test("routine source CRUD is isolated by routine", () => {
     });
 
     assert.equal(added.name, "Directory");
+    assert.equal(added.status, "candidate");
     assert.equal(listSources(db, first.id).length, 1);
     assert.equal(listSources(db, second.id)[0].url, "https://example.test/two");
 
@@ -155,10 +157,12 @@ test("routine source CRUD is isolated by routine", () => {
       newName: "Curated directory",
       url: "https://example.test/updated",
       notes: "Reviewed",
+      status: "verified",
     });
 
     assert.equal(updated.name, "Curated directory");
     assert.equal(updated.notes, "Reviewed");
+    assert.equal(updated.status, "verified");
     assert.deepEqual(removeSource(db, first.id, updated.name), {
       removed: true,
       routineId: first.id,
@@ -166,6 +170,39 @@ test("routine source CRUD is isolated by routine", () => {
     });
     assert.equal(listSources(db, first.id).length, 0);
     assert.equal(listSources(db, second.id).length, 1);
+  });
+});
+
+test("routine sources reject unknown status values", () => {
+  withDatabase((db) => {
+    const routine = createTestRoutine(db);
+
+    assert.throws(
+      () =>
+        addSource(db, {
+          routineId: routine.id,
+          name: "Invalid source",
+          url: "https://example.test/invalid",
+          status: "unknown" as SourceStatus,
+        }),
+      /invalid source status: unknown/,
+    );
+
+    const source = addSource(db, {
+      routineId: routine.id,
+      name: "Valid source",
+      url: "https://example.test/valid",
+    });
+
+    assert.throws(
+      () =>
+        updateSource(db, {
+          routineId: routine.id,
+          name: source.name,
+          status: "unknown" as SourceStatus,
+        }),
+      /invalid source status: unknown/,
+    );
   });
 });
 

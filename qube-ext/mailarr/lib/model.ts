@@ -8,6 +8,8 @@ export const ITEM_STAGES = [
 
 export type ItemStage = (typeof ITEM_STAGES)[number];
 export type RunStatus = "pending" | "running" | "done" | "failed";
+export const SOURCE_STATUSES = ["candidate", "verified", "dead"] as const;
+export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 
 export interface Routine {
   id: number;
@@ -30,6 +32,7 @@ export interface RoutineSource {
   name: string;
   url: string;
   notes: string;
+  status: SourceStatus;
   addedAt: string;
   updatedAt: string;
 }

@@ -17,7 +17,7 @@ import {
   updateSource,
 } from "./lib/db.js";
 import { addItems } from "./lib/intake.js";
-import { ITEM_STAGES } from "./lib/model.js";
+import { ITEM_STAGES, SOURCE_STATUSES } from "./lib/model.js";
 import { sendFirstContact } from "./lib/send.js";
 
 const text = (value: unknown) => ({
@@ -96,12 +96,14 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         name: z.string().min(1),
         url: z.string().url(),
         notes: z.string().optional(),
+        status: z.enum(SOURCE_STATUSES).default("candidate"),
       },
     },
-    ({ routine_id, name, url, notes }) =>
+    ({ routine_id, name, url, notes, status }) =>
       withDb(
         ctx,
-        (db) => addSource(db, { routineId: routine_id, name, url, notes }),
+        (db) =>
+          addSource(db, { routineId: routine_id, name, url, notes, status }),
         true,
       ),
   );
@@ -116,9 +118,10 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         new_name: z.string().min(1).optional(),
         url: z.string().url().optional(),
         notes: z.string().optional(),
+        status: z.enum(SOURCE_STATUSES).optional(),
       },
     },
-    ({ routine_id, name, new_name, url, notes }) =>
+    ({ routine_id, name, new_name, url, notes, status }) =>
       withDb(
         ctx,
         (db) =>
@@ -128,6 +131,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
             newName: new_name,
             url,
             notes,
+            status,
           }),
         true,
       ),

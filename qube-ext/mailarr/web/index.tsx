@@ -11,6 +11,7 @@ import {
 import { request, type WebExtension } from "@qube-code/extension-sdk/web";
 
 type Stage = "discovered" | "qualified" | "contacted" | "replied" | "dropped";
+type SourceStatus = "candidate" | "verified" | "dead";
 
 interface Run {
   id: number;
@@ -43,6 +44,7 @@ interface RoutineSource {
   name: string;
   url: string;
   notes: string;
+  status: SourceStatus;
 }
 
 interface Item {
@@ -109,6 +111,16 @@ const STAGES: Array<"all" | Stage> = [
   "replied",
   "dropped",
 ];
+const SOURCE_STATUS_ORDER: Record<SourceStatus, number> = {
+  verified: 0,
+  candidate: 1,
+  dead: 2,
+};
+const SOURCE_STATUS_CLASS: Record<SourceStatus, string> = {
+  candidate: "border-border bg-muted text-muted-foreground",
+  verified: "border-emerald-500 bg-background text-emerald-500",
+  dead: "border-destructive/40 bg-destructive/10 text-destructive",
+};
 
 const mailarr: WebExtension = {
   id: "mailarr",
@@ -586,21 +598,35 @@ function RoutineDetail({
               <p className="mt-2 text-xs text-muted-foreground">No sources configured.</p>
             ) : (
               <div className="mt-2 space-y-2">
-                {pipeline.sources.map((source) => (
-                  <div key={source.name} className="text-xs">
-                    <a
-                      className="font-medium underline"
-                      href={source.url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {source.name}
-                    </a>
-                    {source.notes && (
-                      <p className="text-muted-foreground">{source.notes}</p>
-                    )}
-                  </div>
-                ))}
+                {[...pipeline.sources]
+                  .sort(
+                    (left, right) =>
+                      SOURCE_STATUS_ORDER[left.status] -
+                        SOURCE_STATUS_ORDER[right.status] ||
+                      left.name.localeCompare(right.name),
+                  )
+                  .map((source) => (
+                    <div key={source.name} className="text-xs">
+                      <div className="flex items-center gap-2">
+                        <a
+                          className="min-w-0 flex-1 truncate font-medium underline"
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {source.name}
+                        </a>
+                        <span
+                          className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${SOURCE_STATUS_CLASS[source.status]}`}
+                        >
+                          {source.status}
+                        </span>
+                      </div>
+                      {source.notes && (
+                        <p className="text-muted-foreground">{source.notes}</p>
+                      )}
+                    </div>
+                  ))}
               </div>
             )}
           </section>
