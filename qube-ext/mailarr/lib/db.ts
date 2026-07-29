@@ -833,6 +833,7 @@ export function recordSent(
 export function routineDashboard(db: DatabaseSync): Array<
   Routine & {
     lastRun: Run | null;
+    hasPendingRun: boolean;
     newLeads: number;
     sentToday: number;
   }
@@ -846,10 +847,14 @@ export function routineDashboard(db: DatabaseSync): Array<
       FROM items
       WHERE routine_id = ? AND stage IN ('discovered', 'qualified')
     `).get(routine.id) as DbRow;
+    const pendingRow = db
+      .prepare("SELECT 1 FROM runs WHERE routine_id = ? AND status = 'pending' LIMIT 1")
+      .get(routine.id);
 
     return {
       ...routine,
       lastRun: lastRow ? runFromRow(lastRow) : null,
+      hasPendingRun: Boolean(pendingRow),
       newLeads: Number(leadRow.count),
       sentToday: sentTodayCount(db, routine.id),
     };

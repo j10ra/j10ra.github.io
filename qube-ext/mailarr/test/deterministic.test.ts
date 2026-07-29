@@ -21,6 +21,7 @@ import {
   listSources,
   openMailarrDatabase,
   removeSource,
+  routineDashboard,
   saveBriefing,
   startRun,
   type RoutineInput,
@@ -39,7 +40,11 @@ import {
 import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js";
 import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
 import { registerMailarrRoutes } from "../routes.js";
-import { serializeKeywordWeights } from "../web/index.js";
+import mailarr, {
+  editorRoutineId,
+  openPipelineEditor,
+  serializeKeywordWeights,
+} from "../web/index.js";
 
 const BASE_ROUTINE: RoutineInput = {
   name: "General outreach",
@@ -329,6 +334,82 @@ test("keyword weights trim terms, dedupe them, and reject empty weights", () => 
     () => serializeKeywordWeights([{ term: "react", weight: "Infinity" }]),
     /Weight for "react" must be finite/,
   );
+});
+
+test("routine dashboard reports whether a run is pending", () => {
+  withDatabase((db) => {
+    const routine = createTestRoutine(db);
+    const dashboardRoutine = () =>
+      routineDashboard(db).find((entry) => entry.id === routine.id);
+
+    assert.equal(dashboardRoutine()?.hasPendingRun, false);
+    const run = createRun(db, routine.id);
+
+    assert.equal(dashboardRoutine()?.hasPendingRun, true);
+    startRun(db, run.id);
+    assert.equal(dashboardRoutine()?.hasPendingRun, false);
+  });
+});
+
+test("pipeline editor opens only when the host API succeeds", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const setWindow = (value: unknown) =>
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      writable: true,
+      value,
+    });
+
+  try {
+    assert.ok(mailarr.editors?.some((editor) => editor.id === "pipeline"));
+    assert.equal(editorRoutineId({ routineId: 7 }), 7);
+    assert.equal(editorRoutineId({ routineId: 0 }), null);
+    assert.equal(editorRoutineId({}), null);
+
+    setWindow({});
+    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), false);
+
+    let opened: { worktreeId: number; spec: unknown } | null = null;
+
+    setWindow({
+      __QUBE_SHARED__: {
+        editorTabs: {
+          open: (worktreeId: number, spec: unknown) => {
+            opened = { worktreeId, spec };
+          },
+        },
+      },
+    });
+
+    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), true);
+    assert.deepEqual(opened, {
+      worktreeId: 11,
+      spec: {
+        ext: "mailarr",
+        editor: "pipeline",
+        key: "routine:7",
+        title: "Scout",
+        payload: { routineId: 7 },
+      },
+    });
+
+    setWindow({
+      __QUBE_SHARED__: {
+        editorTabs: {
+          open: () => {
+            throw new Error("editor rejected");
+          },
+        },
+      },
+    });
+    assert.equal(openPipelineEditor(11, { id: 7, name: "Scout" }), false);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
 });
 
 test("items_add applies a floor only when the routine defines keywords", () => {

@@ -1,7 +1,7 @@
 {
   "id": "mailarr",
   "name": "Mailarr",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "sdkVersion": "^0.8.0",
   "server": "dist/server.js",
   "web": "dist/web.js",
