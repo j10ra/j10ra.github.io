@@ -1,0 +1,19 @@
+{
+  "id": "mailarr",
+  "name": "Mailarr",
+  "version": "0.1.0",
+  "sdkVersion": "^0.8.0",
+  "server": "dist/server.js",
+  "web": "dist/web.js",
+  "capabilities": [
+    "storage",
+    "secrets",
+    "http:remoteok.com",
+    "http:remotive.com",
+    "http:weworkremotely.com",
+    "http:www.arbeitnow.com",
+    "http:jobicy.com",
+    "http:hn.algolia.com",
+    "http:smtp.gmail.com"
+  ]
+}
