@@ -148,6 +148,8 @@ function routineInput(value: unknown): RoutineInput {
     name: string(body.name, "name"),
     cron: string(body.cron, "cron"),
     orderText: string(body.orderText, "order"),
+    session: nullableString(body.session),
+    sessionLabel: nullableString(body.sessionLabel),
     dailyCap: positiveInt(body.dailyCap, "daily cap"),
     verbatimTerms: string(body.verbatimTerms, "verbatim terms", false),
     blockedTopics: stringArray(body.blockedTopics, "blocked topics"),

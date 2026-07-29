@@ -17,6 +17,8 @@ interface SeedData {
     name: string;
     cron: string;
     orderText: string;
+    session: string | null;
+    sessionLabel: string | null;
     dailyCap: number;
     verbatimTerms: string;
     blockedTopics: string[];
@@ -77,6 +79,8 @@ export function initializeSchema(db: DatabaseSync): void {
       name TEXT NOT NULL UNIQUE,
       cron TEXT NOT NULL,
       order_text TEXT NOT NULL,
+      session TEXT,
+      session_label TEXT,
       daily_cap INTEGER NOT NULL CHECK (daily_cap > 0),
       verbatim_terms TEXT NOT NULL,
       blocked_topics TEXT NOT NULL DEFAULT '[]',
@@ -178,13 +182,16 @@ function seedInitialData(db: DatabaseSync): void {
 
   db.prepare(`
     INSERT INTO routines (
-      name, cron, order_text, daily_cap, verbatim_terms, blocked_topics,
+      name, cron, order_text, session, session_label, daily_cap,
+      verbatim_terms, blocked_topics,
       required_disclosure, keywords, score_floor, enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     routine.name,
     routine.cron,
     routine.orderText,
+    routine.session,
+    routine.sessionLabel,
     routine.dailyCap,
     routine.verbatimTerms,
     JSON.stringify(routine.blockedTopics),
@@ -211,6 +218,8 @@ export interface RoutineInput {
   name: string;
   cron: string;
   orderText: string;
+  session: string | null;
+  sessionLabel: string | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];
@@ -223,9 +232,10 @@ export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
   const at = nowIso();
   const result = db.prepare(`
     INSERT INTO routines (
-      name, cron, order_text, daily_cap, verbatim_terms, blocked_topics,
+      name, cron, order_text, session, session_label, daily_cap,
+      verbatim_terms, blocked_topics,
       required_disclosure, keywords, score_floor, enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(...routineValues(input), at, at);
 
   return getRoutine(db, Number(result.lastInsertRowid));
@@ -238,9 +248,9 @@ export function updateRoutine(
 ): Routine {
   const result = db.prepare(`
     UPDATE routines
-    SET name = ?, cron = ?, order_text = ?, daily_cap = ?, verbatim_terms = ?,
-        blocked_topics = ?, required_disclosure = ?, keywords = ?, score_floor = ?,
-        updated_at = ?
+    SET name = ?, cron = ?, order_text = ?, session = ?, session_label = ?,
+        daily_cap = ?, verbatim_terms = ?, blocked_topics = ?,
+        required_disclosure = ?, keywords = ?, score_floor = ?, updated_at = ?
     WHERE id = ?
   `).run(...routineValues(input), nowIso(), id);
 
@@ -256,6 +266,8 @@ function routineValues(input: RoutineInput): Array<string | number | null> {
     input.name.trim(),
     input.cron.trim(),
     input.orderText.trim(),
+    trimmedOrNull(input.session),
+    trimmedOrNull(input.sessionLabel),
     input.dailyCap,
     input.verbatimTerms,
     JSON.stringify(uniqueTerms(input.blockedTopics)),
@@ -454,16 +466,28 @@ export function getRun(db: DatabaseSync, id: number): Run {
 
 export function listPendingRuns(
   db: DatabaseSync,
-): Array<Run & { routineName: string }> {
+): Array<
+  Run & {
+    routineName: string;
+    session: string | null;
+    sessionLabel: string | null;
+  }
+> {
   return (
     db.prepare(`
-      SELECT runs.*, routines.name AS routine_name
+      SELECT runs.*, routines.name AS routine_name, routines.session,
+        routines.session_label
       FROM runs
       JOIN routines ON routines.id = runs.routine_id
       WHERE runs.status = 'pending'
       ORDER BY runs.created_at
     `).all() as DbRow[]
-  ).map((row) => ({ ...runFromRow(row), routineName: String(row.routine_name) }));
+  ).map((row) => ({
+    ...runFromRow(row),
+    routineName: String(row.routine_name),
+    session: row.session ? String(row.session) : null,
+    sessionLabel: row.session_label ? String(row.session_label) : null,
+  }));
 }
 
 export function startRun(db: DatabaseSync, id: number): Run {
@@ -864,6 +888,8 @@ function routineFromRow(row: DbRow): Routine {
     name: String(row.name),
     cron: String(row.cron),
     orderText: String(row.order_text),
+    session: row.session ? String(row.session) : null,
+    sessionLabel: row.session_label ? String(row.session_label) : null,
     dailyCap: Number(row.daily_cap),
     verbatimTerms: String(row.verbatim_terms),
     blockedTopics: parseStringArray(row.blocked_topics, "blocked topics"),
