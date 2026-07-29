@@ -793,6 +793,31 @@ export function getItem(db: DatabaseSync, id: number): Item {
   return itemFromRow(row);
 }
 
+export function deleteItem(
+  db: DatabaseSync,
+  routineId: number,
+  itemId: number,
+): { deleted: true; routineId: number; itemId: number } {
+  const item = getItem(db, itemId);
+
+  if (item.routineId !== routineId) {
+    throw new Error(`item ${itemId} does not belong to routine ${routineId}`);
+  }
+  if ((item.sentPitch || item.sentSubject) && !item.contactedDryRun) {
+    throw new Error(
+      `item ${itemId} was delivered and must remain in audit history`,
+    );
+  }
+
+  const result = db
+    .prepare("DELETE FROM items WHERE id = ? AND routine_id = ?")
+    .run(itemId, routineId);
+
+  if (result.changes === 0) throw new Error(`item ${itemId} not found`);
+
+  return { deleted: true, routineId, itemId };
+}
+
 export function listItems(
   db: DatabaseSync,
   input: {
@@ -984,9 +1009,16 @@ export function recordSent(
     );
     db.prepare(`
       UPDATE items
-      SET stage = 'contacted', sent_pitch = ?, contact_email = ?, updated_at = ?
+      SET run_id = ?, stage = 'contacted', sent_pitch = ?, contact_email = ?,
+          updated_at = ?
       WHERE id = ?
-    `).run(input.body, input.email, input.sentAt, input.itemId);
+    `).run(
+      input.runId,
+      input.body,
+      input.email,
+      input.sentAt,
+      input.itemId,
+    );
     db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
     db.exec("COMMIT");
   } catch (error) {

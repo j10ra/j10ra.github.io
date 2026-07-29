@@ -13,6 +13,7 @@ import {
   addSource,
   createRoutine,
   createRun,
+  deleteItem,
   finishRun,
   getItem,
   getRoutine,
@@ -903,6 +904,88 @@ test("item_update stores a reviewable draft subject and send subject is optional
   });
 });
 
+test("deleteItem removes review drafts and protects ownership and audit history", async () => {
+  await withDatabaseAsync(async (db) => {
+    const firstRoutine = createTestRoutine(db, { name: "Delete first routine" });
+    const secondRoutine = createTestRoutine(db, { name: "Delete second routine" });
+    setRoutineFrozen(db, firstRoutine.id, true);
+    const run = startRun(db, createRun(db, firstRoutine.id).id);
+    const draft = addQualifiedItem(
+      db,
+      firstRoutine.id,
+      run.id,
+      "Delete Draft Company",
+      "delete-draft",
+    );
+
+    updateItem(db, draft.id, {
+      draftSubject: "Stored review subject",
+      draftPitch: validDraft(firstRoutine.requiredDisclosure),
+    });
+    assert.throws(
+      () => deleteItem(db, secondRoutine.id, draft.id),
+      /does not belong to routine/,
+    );
+    assert.deepEqual(deleteItem(db, firstRoutine.id, draft.id), {
+      deleted: true,
+      routineId: firstRoutine.id,
+      itemId: draft.id,
+    });
+    assert.throws(() => getItem(db, draft.id), /not found/);
+
+    const dryRun = addQualifiedItem(
+      db,
+      firstRoutine.id,
+      run.id,
+      "Dry Run Delete Company",
+      "dry-run-delete",
+    );
+
+    updateItem(db, dryRun.id, {
+      draftSubject: "Dry run subject",
+      draftPitch: validDraft(firstRoutine.requiredDisclosure),
+    });
+    await sendFirstContact({
+      db,
+      itemId: dryRun.id,
+      runId: run.id,
+      draft: validDraft(firstRoutine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: true,
+    });
+    assert.equal(getItem(db, dryRun.id).contactedDryRun, true);
+    assert.equal(deleteItem(db, firstRoutine.id, dryRun.id).deleted, true);
+
+    const delivered = addQualifiedItem(
+      db,
+      firstRoutine.id,
+      run.id,
+      "Delivered Audit Company",
+      "delivered-audit",
+    );
+
+    updateItem(db, delivered.id, {
+      draftSubject: "Delivered subject",
+      draftPitch: validDraft(firstRoutine.requiredDisclosure),
+    });
+    await sendFirstContact({
+      db,
+      itemId: delivered.id,
+      runId: run.id,
+      draft: validDraft(firstRoutine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: false,
+      deliver: async () => undefined,
+    });
+
+    assert.throws(
+      () => deleteItem(db, firstRoutine.id, delivered.id),
+      /audit history/,
+    );
+    assert.equal(getItem(db, delivered.id).stage, "contacted");
+  });
+});
+
 test("freeze stamps review time and refreeze clears edited state", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const created = (await routes.call("POST", "/api/mailarr/routines", {
@@ -1169,6 +1252,293 @@ test("unlocked routines refuse sends even in dry-run mode", async () => {
       assert.equal(response.isError, true);
       assert.match(JSON.stringify(response), /routine is unlocked for editing/iu);
     }, dataDir);
+  });
+});
+
+test("panel send uses the stored reviewed draft and completes a manual dry-run", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const db = openMailarrDatabase(dataDir);
+    let routineId = 0;
+    let itemId = 0;
+
+    try {
+      const routine = createTestRoutine(db, { name: "Panel stored draft" });
+
+      routineId = routine.id;
+      setRoutineFrozen(db, routine.id, true);
+      const sourceRun = startRun(db, createRun(db, routine.id).id);
+      const item = addQualifiedItem(
+        db,
+        routine.id,
+        sourceRun.id,
+        "Stored Panel Company",
+        "stored-panel",
+      );
+
+      itemId = item.id;
+      updateItem(db, item.id, {
+        draftSubject: "Stored panel subject",
+        draftPitch: validDraft(routine.requiredDisclosure),
+      });
+    } finally {
+      db.close();
+    }
+
+    const response = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/items/:itemId/send",
+      {},
+      { id: String(routineId), itemId: String(itemId) },
+    )) as {
+      result: { dryRun: boolean; body: string; sentAt: string };
+      run: { id: number; status: string; errorText: string | null };
+    };
+
+    assert.equal(response.result.dryRun, true);
+    assert.equal(response.run.status, "done");
+    assert.equal(response.run.errorText, null);
+
+    const inspected = openMailarrDatabase(dataDir);
+    try {
+      const item = getItem(inspected, itemId);
+      const sent = inspected
+        .prepare(
+          "SELECT subject, body, dry_run FROM sent_log WHERE run_id = ?",
+        )
+        .get(response.run.id) as {
+        subject: string;
+        body: string;
+        dry_run: number;
+      };
+      const briefing = inspected
+        .prepare("SELECT markdown_body FROM briefings WHERE run_id = ?")
+        .get(response.run.id) as { markdown_body: string };
+
+      assert.equal(item.stage, "contacted");
+      assert.equal(item.runId, response.run.id);
+      assert.equal(item.sentSubject, "Stored panel subject");
+      assert.equal(item.contactedDryRun, true);
+      assert.equal(sent.subject, "Stored panel subject");
+      assert.equal(sent.body, response.result.body);
+      assert.equal(sent.dry_run, 1);
+      assert.equal(
+        briefing.markdown_body,
+        `Manual panel send: Stored Panel Company (dry run) ${response.result.sentAt}`,
+      );
+    } finally {
+      inspected.close();
+    }
+  });
+});
+
+test("panel send failures finish manual runs with briefings", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const db = openMailarrDatabase(dataDir);
+    const targets: Array<{ routineId: number; itemId: number }> = [];
+
+    try {
+      for (const [name, frozen, draft] of [
+        ["Missing Panel Draft", true, false],
+        ["Unlocked Panel Draft", false, true],
+      ] as const) {
+        const routine = createTestRoutine(db, { name });
+
+        if (frozen) setRoutineFrozen(db, routine.id, true);
+        const sourceRun = startRun(db, createRun(db, routine.id).id);
+        const item = addQualifiedItem(
+          db,
+          routine.id,
+          sourceRun.id,
+          `${name} Company`,
+          name.toLowerCase().replaceAll(" ", "-"),
+        );
+
+        if (draft) {
+          updateItem(db, item.id, {
+            draftSubject: "Stored panel subject",
+            draftPitch: validDraft(routine.requiredDisclosure),
+          });
+        }
+        targets.push({ routineId: routine.id, itemId: item.id });
+      }
+    } finally {
+      db.close();
+    }
+
+    for (const [index, target] of targets.entries()) {
+      const response = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/items/:itemId/send",
+        {},
+        { id: String(target.routineId), itemId: String(target.itemId) },
+      )) as { status: number; body: { error: string } };
+
+      assert.equal(response.status, 400);
+      assert.match(
+        response.body.error,
+        index === 0 ? /no stored draft/ : /routine is unlocked for editing/,
+      );
+
+      const inspected = openMailarrDatabase(dataDir);
+      try {
+        const run = inspected
+          .prepare(
+            "SELECT id, status, error_text FROM runs WHERE routine_id = ? ORDER BY id DESC LIMIT 1",
+          )
+          .get(target.routineId) as {
+          id: number;
+          status: string;
+          error_text: string;
+        };
+        const briefing = inspected
+          .prepare("SELECT markdown_body FROM briefings WHERE run_id = ?")
+          .get(run.id) as { markdown_body: string };
+
+        assert.equal(run.status, "failed");
+        assert.equal(run.error_text, response.body.error);
+        assert.match(briefing.markdown_body, /Manual panel send failed:/);
+        assert.match(briefing.markdown_body, new RegExp(response.body.error));
+      } finally {
+        inspected.close();
+      }
+    }
+  });
+});
+
+test("panel send surfaces cap and dedupe guards in failed manual runs", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const db = openMailarrDatabase(dataDir);
+    let capRoutineId = 0;
+    let capFirstId = 0;
+    let capSecondId = 0;
+    let dedupeRoutineId = 0;
+    let duplicateId = 0;
+
+    try {
+      const capped = createTestRoutine(db, {
+        name: "Panel capped routine",
+        dailyCap: 1,
+      });
+
+      capRoutineId = capped.id;
+      setRoutineFrozen(db, capped.id, true);
+      const capSourceRun = startRun(db, createRun(db, capped.id).id);
+      const capFirst = addQualifiedItem(
+        db,
+        capped.id,
+        capSourceRun.id,
+        "Panel Cap First",
+        "panel-cap-first",
+      );
+      const capSecond = addQualifiedItem(
+        db,
+        capped.id,
+        capSourceRun.id,
+        "Panel Cap Second",
+        "panel-cap-second",
+      );
+
+      capFirstId = capFirst.id;
+      capSecondId = capSecond.id;
+      for (const item of [capFirst, capSecond]) {
+        updateItem(db, item.id, {
+          draftSubject: "Stored panel subject",
+          draftPitch: validDraft(capped.requiredDisclosure),
+        });
+      }
+
+      const dedupe = createTestRoutine(db, { name: "Panel dedupe routine" });
+
+      dedupeRoutineId = dedupe.id;
+      setRoutineFrozen(db, dedupe.id, true);
+      const dedupeSourceRun = startRun(db, createRun(db, dedupe.id).id);
+      const delivered = addQualifiedItem(
+        db,
+        dedupe.id,
+        dedupeSourceRun.id,
+        "Panel Duplicate Company",
+        "panel-duplicate-first",
+      );
+
+      updateItem(db, delivered.id, {
+        draftSubject: "Stored panel subject",
+        draftPitch: validDraft(dedupe.requiredDisclosure),
+      });
+      await sendFirstContact({
+        db,
+        itemId: delivered.id,
+        runId: dedupeSourceRun.id,
+        draft: validDraft(dedupe.requiredDisclosure),
+        smtp: smtp(),
+        dryRun: false,
+        deliver: async () => undefined,
+      });
+      const duplicate = addQualifiedItem(
+        db,
+        dedupe.id,
+        dedupeSourceRun.id,
+        "Panel Duplicate Company",
+        "panel-duplicate-second",
+      );
+
+      duplicateId = duplicate.id;
+      updateItem(db, duplicate.id, {
+        draftSubject: "Stored panel subject",
+        draftPitch: validDraft(dedupe.requiredDisclosure),
+      });
+    } finally {
+      db.close();
+    }
+
+    const callSend = (routineId: number, itemId: number) =>
+      routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/items/:itemId/send",
+        {},
+        { id: String(routineId), itemId: String(itemId) },
+      );
+
+    await callSend(capRoutineId, capFirstId);
+    const capError = (await callSend(capRoutineId, capSecondId)) as {
+      status: number;
+      body: { error: string };
+    };
+    const dedupeError = (await callSend(dedupeRoutineId, duplicateId)) as {
+      status: number;
+      body: { error: string };
+    };
+
+    assert.equal(capError.status, 400);
+    assert.match(capError.body.error, /Daily cap of 1 reached/);
+    assert.equal(dedupeError.status, 400);
+    assert.match(dedupeError.body.error, /already been contacted/);
+
+    const inspected = openMailarrDatabase(dataDir);
+    try {
+      for (const [routineId, expected] of [
+        [capRoutineId, capError.body.error],
+        [dedupeRoutineId, dedupeError.body.error],
+      ] as const) {
+        const failed = inspected
+          .prepare(
+            "SELECT id, status, error_text FROM runs WHERE routine_id = ? ORDER BY id DESC LIMIT 1",
+          )
+          .get(routineId) as {
+          id: number;
+          status: string;
+          error_text: string;
+        };
+        const briefing = inspected
+          .prepare("SELECT markdown_body FROM briefings WHERE run_id = ?")
+          .get(failed.id) as { markdown_body: string };
+
+        assert.equal(failed.status, "failed");
+        assert.equal(failed.error_text, expected);
+        assert.match(briefing.markdown_body, new RegExp(expected));
+      }
+    } finally {
+      inspected.close();
+    }
   });
 });
 
@@ -1627,6 +1997,16 @@ async function withPanelRoutes(
   } as unknown as Parameters<typeof registerMailarrRoutes>[0];
   const ctx = {
     dataDir,
+    config: {
+      dry_run: true,
+      smtp_host: "smtp.example.test",
+      smtp_port: 465,
+      from_address: "sender@example.test",
+    },
+    secrets: {
+      get: async (key: string) =>
+        key === "smtp_user" ? "user" : key === "smtp_password" ? "secret" : null,
+    },
     broadcast: () => undefined,
   } as unknown as ExtensionContext;
 
