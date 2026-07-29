@@ -664,14 +664,17 @@ function RoutineDetail({
             {STAGES.map((entry) => (
               <button
                 key={entry}
-                className={`rounded-full border px-2 py-1 text-[11px] ${
+                className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs leading-5 ${
                   stage === entry
                     ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border"
+                    : "border-border text-muted-foreground"
                 }`}
                 onClick={() => setStage(entry)}
               >
-                {entry} {pipeline.counts[entry]}
+                <span>{entry}</span>
+                <span className={stage === entry ? "opacity-80" : "opacity-60"}>
+                  {pipeline.counts[entry]}
+                </span>
               </button>
             ))}
           </div>
