@@ -36,6 +36,7 @@ const seedData = JSON.parse(
   readFileSync(new URL("../seed/job-scout.json", import.meta.url), "utf8"),
 ) as SeedData;
 const nowIso = () => new Date().toISOString();
+export const MANUAL_PANEL_BRIEFING_PREFIX = "[mailarr:manual-panel-send]";
 
 export function normalizeCompany(company: string): string {
   return company
@@ -793,6 +794,37 @@ export function getItem(db: DatabaseSync, id: number): Item {
   return itemFromRow(row);
 }
 
+export function deleteItem(
+  db: DatabaseSync,
+  routineId: number,
+  itemId: number,
+): { deleted: true; routineId: number; itemId: number } {
+  const item = getItem(db, itemId);
+
+  if (item.routineId !== routineId) {
+    throw new Error(`item ${itemId} does not belong to routine ${routineId}`);
+  }
+  const realSend = db.prepare(`
+    SELECT 1
+    FROM sent_log
+    WHERE run_id = ? AND normalized_company = ? AND dry_run = 0
+  `).get(item.runId, item.normalizedCompany);
+
+  if (realSend) {
+    throw new Error(
+      `item ${itemId} was delivered and must remain in audit history`,
+    );
+  }
+
+  const result = db
+    .prepare("DELETE FROM items WHERE id = ? AND routine_id = ?")
+    .run(itemId, routineId);
+
+  if (result.changes === 0) throw new Error(`item ${itemId} not found`);
+
+  return { deleted: true, routineId, itemId };
+}
+
 export function listItems(
   db: DatabaseSync,
   input: {
@@ -913,9 +945,10 @@ export function latestBriefing(
     FROM briefings
     JOIN runs ON runs.id = briefings.run_id
     WHERE runs.routine_id = ?
+      AND briefings.markdown_body NOT LIKE ?
     ORDER BY briefings.created_at DESC
     LIMIT 1
-  `).get(routineId) as DbRow | undefined;
+  `).get(routineId, `${MANUAL_PANEL_BRIEFING_PREFIX}%`) as DbRow | undefined;
 
   return row
     ? {
@@ -984,9 +1017,16 @@ export function recordSent(
     );
     db.prepare(`
       UPDATE items
-      SET stage = 'contacted', sent_pitch = ?, contact_email = ?, updated_at = ?
+      SET run_id = ?, stage = 'contacted', sent_pitch = ?, contact_email = ?,
+          updated_at = ?
       WHERE id = ?
-    `).run(input.body, input.email, input.sentAt, input.itemId);
+    `).run(
+      input.runId,
+      input.body,
+      input.email,
+      input.sentAt,
+      input.itemId,
+    );
     db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
     db.exec("COMMIT");
   } catch (error) {

@@ -7,19 +7,27 @@ import {
   cancelPendingRuns,
   createRoutine,
   createRun,
+  deleteItem,
+  finishRun,
+  getItem,
   getRoutine,
   latestBriefing,
   listItems,
   listSources,
+  MANUAL_PANEL_BRIEFING_PREFIX,
   openMailarrDatabase,
   pipelineCounts,
   routineDashboard,
+  saveBriefing,
   type RoutineInput,
   setRoutineEnabled,
   setRoutineFrozen,
+  startRun,
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
+import { requireFrozenRoutine, sendFirstContact } from "./lib/send.js";
+import { dryRunEnabled } from "./mcp.js";
 
 type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
 type ExtensionApp = Parameters<RegisterRoutes>[0];
@@ -159,10 +167,101 @@ export function registerMailarrRoutes(
       }),
   );
 
+  app.post<{ Params: { id: string; itemId: string } }>(
+    "/api/mailarr/routines/:id/items/:itemId/delete",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const deleted = deleteItem(
+          db,
+          positiveInt(req.params.id, "routine id"),
+          positiveInt(req.params.itemId, "item id"),
+        );
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return deleted;
+      }),
+  );
+
+  app.post<{ Params: { id: string; itemId: string } }>(
+    "/api/mailarr/routines/:id/items/:itemId/send",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, async (db, ctx) => {
+        const routineId = positiveInt(req.params.id, "routine id");
+        const itemId = positiveInt(req.params.itemId, "item id");
+        const item = getItem(db, itemId);
+
+        if (item.routineId !== routineId) {
+          throw new Error(
+            `item ${itemId} does not belong to routine ${routineId}`,
+          );
+        }
+        if (!getRoutine(db, routineId).frozen) {
+          throw new Error(
+            "routine is unlocked for editing; freeze it in the panel to enable sends",
+          );
+        }
+
+        const run = startRun(db, createRun(db, routineId).id);
+
+        try {
+          if (!item.draftPitch) {
+            throw new Error(`item ${itemId} has no stored draft`);
+          }
+
+          requireFrozenRoutine(db, run.id);
+          const [smtpUser, smtpPassword] = await Promise.all([
+            ctx.secrets.get("smtp_user"),
+            ctx.secrets.get("smtp_password"),
+          ]);
+          const result = await sendFirstContact({
+            db,
+            runId: run.id,
+            itemId,
+            draft: item.draftPitch,
+            smtp: {
+              host: configString(ctx.config, "smtp_host"),
+              port: configPort(ctx.config),
+              user: smtpUser ?? "",
+              password: smtpPassword ?? "",
+              fromAddress: configString(ctx.config, "from_address"),
+            },
+            dryRun: dryRunEnabled(ctx.config),
+          });
+          saveBriefing(
+            db,
+            run.id,
+            `${MANUAL_PANEL_BRIEFING_PREFIX} Manual panel send: ${item.company} (${
+              result.dryRun ? "dry run" : "delivered"
+            }) ${result.sentAt}`,
+          );
+          const finished = finishRun(db, run.id, "done");
+
+          ctx.broadcast({ type: "mailarr-changed" });
+
+          return { result, run: finished };
+        } catch (error) {
+          const errorText = message(error);
+
+          saveBriefing(
+            db,
+            run.id,
+            `${MANUAL_PANEL_BRIEFING_PREFIX} Manual panel send failed: ${
+              item.company
+            } ${new Date().toISOString()}: ${errorText}`,
+          );
+          finishRun(db, run.id, "failed", errorText);
+          ctx.broadcast({ type: "mailarr-changed" });
+
+          throw error;
+        }
+      }),
+  );
+
   app.get<{ Params: { id: string }; Querystring: { stage?: string } }>(
     "/api/mailarr/routines/:id/pipeline",
     async (req, reply) =>
-      useDb(req, reply, getCtx, (db) => {
+      useDb(req, reply, getCtx, (db, ctx) => {
         const routineId = positiveInt(req.params.id, "routine id");
         const stage = parseStage(req.query.stage);
         const items = listItems(db, {
@@ -183,6 +282,7 @@ export function registerMailarrRoutes(
           sources: listSources(db, routineId),
           counts: pipelineCounts(db, routineId),
           briefing: latestBriefing(db, routineId),
+          dryRun: dryRunEnabled(ctx.config),
           items,
         };
       }),
@@ -319,6 +419,18 @@ function positiveInt(value: unknown, field: string): number {
   }
 
   return parsed;
+}
+
+function configString(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function configPort(config: Record<string, unknown>): number {
+  const value = Number(config.smtp_port);
+
+  return Number.isInteger(value) ? value : 0;
 }
 
 function message(error: unknown): string {

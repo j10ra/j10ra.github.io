@@ -75,6 +75,7 @@ interface Item {
   draftPitch: string | null;
   sentSubject: string | null;
   sentPitch: string | null;
+  contactedDryRun: boolean;
   dropReason: string | null;
   createdAt: string;
 }
@@ -84,6 +85,7 @@ interface Pipeline {
   sources: RoutineSource[];
   counts: Record<"all" | Stage, number>;
   briefing: { markdown: string; createdAt: string } | null;
+  dryRun: boolean;
   items: Item[];
 }
 
@@ -1277,7 +1279,17 @@ function RoutineWorkbench({
               <EmailStateBadge item={item} />
               <span className="truncate text-muted-foreground">{item.source}</span>
             </button>
-            {expanded === item.id && <PipelineItemDetail item={item} />}
+            {expanded === item.id && (
+              <PipelineItemDetail
+                item={item}
+                routineId={pipeline.routine.id}
+                dryRun={pipeline.dryRun}
+                onChanged={async () => {
+                  rememberExpanded(null);
+                  await load();
+                }}
+              />
+            )}
           </div>
         ))}
         {pipeline.items.length === 0 && (
@@ -1590,15 +1602,56 @@ function EmailStateBadge({ item }: { item: Item }) {
           : "border-amber-500/50 text-amber-500"
       }`}
     >
-      {sent ? "sent" : "draft"}
+      {sent ? (item.contactedDryRun ? "dry run" : "sent") : "draft"}
     </span>
   );
 }
 
-function PipelineItemDetail({ item }: { item: Item }) {
+function PipelineItemDetail({
+  item,
+  routineId,
+  dryRun,
+  onChanged,
+}: {
+  item: Item;
+  routineId: number;
+  dryRun: boolean;
+  onChanged: () => Promise<void>;
+}) {
+  const [armed, setArmed] = useState<"delete" | "send" | null>(null);
+  const [busy, setBusy] = useState<"delete" | "send" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const sent = Boolean(item.sentPitch || item.sentSubject);
   const subject = sent ? item.sentSubject : item.draftSubject;
   const body = sent ? item.sentPitch : item.draftPitch;
+  const canSend = item.stage === "qualified" && Boolean(item.draftPitch);
+  const performAction = async (action: "delete" | "send") => {
+    if (armed !== action) {
+      setArmed(action);
+      setActionError(null);
+      return;
+    }
+
+    setBusy(action);
+    try {
+      await request(
+        `/api/mailarr/routines/${routineId}/items/${item.id}/${action}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      );
+      setArmed(null);
+      setActionError(null);
+      await onChanged();
+    } catch (error) {
+      setArmed(null);
+      setActionError(message(error));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="grid gap-4 border-t border-border bg-muted/15 px-10 py-4 text-sm md:grid-cols-2">
@@ -1620,6 +1673,66 @@ function PipelineItemDetail({ item }: { item: Item }) {
         <div className="mt-4">
           <PipelineField label="Body" value={body ?? "not drafted yet"} />
         </div>
+      </section>
+      <section style={{ gridColumn: "1 / -1" }}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          {canSend && (
+            <button
+              style={{ minHeight: 34 }}
+              className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${
+                armed === "send"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background hover:bg-muted"
+              }`}
+              type="button"
+              disabled={busy !== null}
+              onBlur={() => setArmed(null)}
+              onClick={() => void performAction("send")}
+            >
+              <Play size={15} />
+              {busy === "send"
+                ? "Sending..."
+                : armed === "send"
+                  ? `Click again to send${dryRun ? " (dry run)" : ""}`
+                  : `Send${dryRun ? " (dry run)" : ""}`}
+            </button>
+          )}
+          <button
+            style={{ minHeight: 34 }}
+            className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${
+              armed === "delete"
+                ? "border-destructive bg-destructive text-destructive-foreground"
+                : "border-destructive/50 bg-background text-destructive hover:bg-destructive/10"
+            }`}
+            type="button"
+            disabled={busy !== null}
+            onBlur={() => setArmed(null)}
+            onClick={() => void performAction("delete")}
+          >
+            <Trash2 size={15} />
+            {busy === "delete"
+              ? "Deleting..."
+              : armed === "delete"
+                ? "Click again to delete"
+                : "Delete"}
+          </button>
+        </div>
+        {actionError && (
+          <p
+            style={{ marginTop: 8 }}
+            className="text-xs text-destructive"
+            role="alert"
+          >
+            {actionError}
+          </p>
+        )}
       </section>
       <a
         className="text-primary underline"
