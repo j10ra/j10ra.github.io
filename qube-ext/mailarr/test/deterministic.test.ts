@@ -436,7 +436,7 @@ test("initial migration seeds Job Scout and permanent contacted companies once",
     companies.map((row) => row.company),
     ["Faithlife", "Very Real Help"],
   );
-  assert.equal(version.user_version, 2);
+  assert.equal(version.user_version, 3);
   db.close();
 
   db = openMailarrDatabase(dataDir);

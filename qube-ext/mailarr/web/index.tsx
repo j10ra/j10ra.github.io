@@ -17,6 +17,7 @@ import {
   request,
   type WebExtension,
 } from "@qube-code/extension-sdk/web";
+import { BUILT_IN_SOURCES } from "../lib/sources/index.js";
 
 type RunStatus = "pending" | "running" | "done" | "failed";
 type Stage = "discovered" | "qualified" | "contacted" | "replied" | "dropped";
@@ -38,6 +39,7 @@ interface Routine {
   cron: string;
   orderText: string;
   dailyCap: number;
+  sources: string[] | null;
   enabled: boolean;
   lastRun: Run | null;
   newLeads: number;
@@ -75,6 +77,7 @@ interface RoutineForm {
   cron: string;
   orderText: string;
   dailyCap: number;
+  sources: string[];
 }
 
 const EMPTY_FORM: RoutineForm = {
@@ -82,6 +85,7 @@ const EMPTY_FORM: RoutineForm = {
   cron: "0 9 * * *",
   orderText: "",
   dailyCap: 5,
+  sources: BUILT_IN_SOURCES.map((source) => source.id),
 };
 
 const STAGES: Array<{ key: "all" | Stage; label: string }> = [
@@ -212,6 +216,8 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                   cron: routine.cron,
                   orderText: routine.orderText,
                   dailyCap: routine.dailyCap,
+                  sources:
+                    routine.sources ?? BUILT_IN_SOURCES.map((source) => source.id),
                 })
               }
               onToggle={() =>
@@ -375,6 +381,33 @@ function RoutineEditor({
             }
           />
         </Field>
+        <div>
+          <p className="mb-1 text-[10px] font-medium text-muted-foreground">
+            Built-in sources
+          </p>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 rounded border border-border bg-background px-2 py-1.5">
+            {BUILT_IN_SOURCES.map((source) => (
+              <label
+                key={source.id}
+                className="flex cursor-pointer items-center gap-1 text-[10px] text-foreground"
+              >
+                <input
+                  type="checkbox"
+                  checked={value.sources.includes(source.id)}
+                  onChange={(event) =>
+                    onChange({
+                      ...value,
+                      sources: event.target.checked
+                        ? [...value.sources, source.id]
+                        : value.sources.filter((id) => id !== source.id),
+                    })
+                  }
+                />
+                {source.label}
+              </label>
+            ))}
+          </div>
+        </div>
         <button
           type="button"
           disabled={

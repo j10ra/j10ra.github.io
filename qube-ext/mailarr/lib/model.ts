@@ -31,6 +31,7 @@ export interface Routine {
   cron: string;
   orderText: string;
   dailyCap: number;
+  sources: string[] | null;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;

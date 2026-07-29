@@ -44,6 +44,7 @@ export function migrate(db: DatabaseSync): void {
       cron TEXT NOT NULL,
       order_text TEXT NOT NULL,
       daily_cap INTEGER NOT NULL CHECK (daily_cap > 0),
+      sources TEXT,
       enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -109,6 +110,7 @@ export function migrate(db: DatabaseSync): void {
   `);
   if (version < 1) seedInitialData(db);
   if (version < 2) migrateLegacySentLog(db);
+  if (version < 3) migrateRoutineSources(db);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
@@ -119,7 +121,15 @@ export function migrate(db: DatabaseSync): void {
       WHERE dry_run = 0;
   `);
 
-  db.exec("PRAGMA user_version = 2");
+  db.exec("PRAGMA user_version = 3");
+}
+
+function migrateRoutineSources(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(routines)").all() as Array<{ name: string }>;
+
+  if (!columns.some((column) => column.name === "sources")) {
+    db.exec("ALTER TABLE routines ADD COLUMN sources TEXT");
+  }
 }
 
 function migrateLegacySentLog(db: DatabaseSync): void {
@@ -183,15 +193,30 @@ function seedInitialData(db: DatabaseSync): void {
 
 export function createRoutine(
   db: DatabaseSync,
-  input: { name: string; cron: string; orderText: string; dailyCap: number },
+  input: {
+    name: string;
+    cron: string;
+    orderText: string;
+    dailyCap: number;
+    sources?: string[] | null;
+  },
 ): Routine {
   const at = nowIso();
   const result = db
     .prepare(`
-      INSERT INTO routines (name, cron, order_text, daily_cap, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 0, ?, ?)
+      INSERT INTO routines
+        (name, cron, order_text, daily_cap, sources, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?)
     `)
-    .run(input.name.trim(), input.cron.trim(), input.orderText.trim(), input.dailyCap, at, at);
+    .run(
+      input.name.trim(),
+      input.cron.trim(),
+      input.orderText.trim(),
+      input.dailyCap,
+      serializeSources(input.sources),
+      at,
+      at,
+    );
 
   return getRoutine(db, Number(result.lastInsertRowid));
 }
@@ -199,12 +224,18 @@ export function createRoutine(
 export function updateRoutine(
   db: DatabaseSync,
   id: number,
-  input: { name: string; cron: string; orderText: string; dailyCap: number },
+  input: {
+    name: string;
+    cron: string;
+    orderText: string;
+    dailyCap: number;
+    sources?: string[] | null;
+  },
 ): Routine {
   const result = db
     .prepare(`
       UPDATE routines
-      SET name = ?, cron = ?, order_text = ?, daily_cap = ?, updated_at = ?
+      SET name = ?, cron = ?, order_text = ?, daily_cap = ?, sources = ?, updated_at = ?
       WHERE id = ?
     `)
     .run(
@@ -212,6 +243,7 @@ export function updateRoutine(
       input.cron.trim(),
       input.orderText.trim(),
       input.dailyCap,
+      serializeSources(input.sources),
       nowIso(),
       id,
     );
@@ -364,6 +396,20 @@ export function recordScanResult(
       WHERE id = ?
     `)
     .run(foundCount, errorText, fullyFailed ? 1 : 0, fullyFailed ? 1 : 0, nowIso(), id);
+
+  if (result.changes === 0) throw new Error(`run ${id} not found`);
+
+  return getRun(db, id);
+}
+
+export function incrementRunFoundCount(
+  db: DatabaseSync,
+  id: number,
+  foundCount: number,
+): Run {
+  const result = db
+    .prepare("UPDATE runs SET found_count = found_count + ? WHERE id = ?")
+    .run(foundCount, id);
 
   if (result.changes === 0) throw new Error(`run ${id} not found`);
 
@@ -723,10 +769,27 @@ function routineFromRow(row: DbRow): Routine {
     cron: String(row.cron),
     orderText: String(row.order_text),
     dailyCap: Number(row.daily_cap),
+    sources: parseSources(row.sources),
     enabled: Boolean(row.enabled),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function serializeSources(sources: string[] | null | undefined): string | null {
+  return sources == null ? null : JSON.stringify([...new Set(sources)]);
+}
+
+function parseSources(value: DbRow[string]): string[] | null {
+  if (value == null) return null;
+
+  const parsed = JSON.parse(String(value)) as unknown;
+
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error("routine sources must be a JSON string array");
+  }
+
+  return parsed;
 }
 
 function runFromRow(row: DbRow): Run {
