@@ -25,7 +25,7 @@ When nudged, or while polling for work:
 4. When the order requests source maintenance, use `sources_list`, `source_add`, `source_update`, and `source_remove`.
 5. Fetch the routine's sources as directed and submit contacts with `items_add`.
 6. Review contacts with `items_list` and qualify them with `item_update`.
-7. Draft one message per qualified contact. Include the routine's `required_disclosure` exactly when set and include `{{TERMS}}` exactly once.
+7. Draft one subject and body per qualified contact, then store them as `draft_subject` and `draft_pitch` with `item_update`. Include the routine's `required_disclosure` exactly when set and include `{{TERMS}}` exactly once.
 8. Call `send_first_contact` until the routine cap is reached.
 9. Call `post_briefing`.
 10. Call `run_finish`.

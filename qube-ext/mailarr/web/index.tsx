@@ -71,7 +71,9 @@ interface Item {
   score: number;
   contactEmail: string | null;
   fitNotes: string | null;
+  draftSubject: string | null;
   draftPitch: string | null;
+  sentSubject: string | null;
   sentPitch: string | null;
   dropReason: string | null;
   createdAt: string;
@@ -97,6 +99,28 @@ interface RoutineForm {
   requiredDisclosure: string;
   keywords: KeywordWeight[];
   scoreFloor: string;
+}
+
+type WorkbenchTarget = number | "new";
+
+interface StoredFormDraft {
+  value: RoutineForm;
+  reviewedUpdatedAt: string | null;
+}
+
+interface WorkbenchViewState {
+  stage: "all" | Stage;
+  expandedItemId: number | null;
+  briefingExpanded: boolean;
+  reviewingFreeze: boolean;
+  view: "pipeline" | "edit";
+}
+
+interface PanelViewState {
+  fallbackTarget: WorkbenchTarget | null;
+  lastOpenedRoutineId: number | null;
+  workbenches: Record<string, WorkbenchViewState>;
+  forms: Record<string, StoredFormDraft>;
 }
 
 interface KeywordWeight {
@@ -139,6 +163,61 @@ const SOURCE_STATUS_CLASS: Record<SourceStatus, string> = {
   dead: "border-destructive/40 bg-destructive/10 text-destructive",
 };
 
+export function createMemoryStore<T>() {
+  const values = new Map<string, T>();
+
+  return {
+    read: (key: string): T | undefined => values.get(key),
+    write: (key: string, value: T): void => {
+      values.set(key, value);
+    },
+    remove: (key: string): void => {
+      values.delete(key);
+    },
+  };
+}
+
+const mailarrUiState = createMemoryStore<PanelViewState>();
+
+function panelViewState(worktreeId: number): PanelViewState {
+  const key = String(worktreeId);
+  const current = mailarrUiState.read(key);
+
+  if (current) return current;
+
+  const created: PanelViewState = {
+    fallbackTarget: null,
+    lastOpenedRoutineId: null,
+    workbenches: {},
+    forms: {},
+  };
+
+  mailarrUiState.write(key, created);
+
+  return created;
+}
+
+function updatePanelViewState(
+  worktreeId: number,
+  update: (current: PanelViewState) => PanelViewState,
+): void {
+  mailarrUiState.write(String(worktreeId), update(panelViewState(worktreeId)));
+}
+
+function workbenchStateKey(target: WorkbenchTarget): string {
+  return target === "new" ? "new" : `routine:${target}`;
+}
+
+function defaultWorkbenchState(target: WorkbenchTarget): WorkbenchViewState {
+  return {
+    stage: "all",
+    expandedItemId: null,
+    briefingExpanded: false,
+    reviewingFreeze: false,
+    view: target === "new" ? "edit" : "pipeline",
+  };
+}
+
 export function serializeKeywordWeights(
   rows: Array<{ term: string; weight: string }>,
 ): Record<string, number> | null {
@@ -177,6 +256,24 @@ export function pendingAge(createdAt: string, now = new Date()): string {
   return `${Math.floor(elapsedSeconds / 86_400)}d`;
 }
 
+export function briefingSummary(markdown: string, limit = 120): string {
+  const summary = markdown
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean)
+    ?.replace(/^#{1,6}\s+/u, "")
+    .replace(/^[-*+]\s+/u, "")
+    .replace(/^\d+\.\s+/u, "")
+    .replace(/(\*\*|__|\*|_|`)/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+
+  if (!summary) return "No briefing content.";
+  if (summary.length <= limit) return summary;
+
+  return `${summary.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+}
+
 const mailarr: WebExtension = {
   id: "mailarr",
   panels: [
@@ -190,15 +287,15 @@ const mailarr: WebExtension = {
   ],
   editors: [
     {
-      id: "pipeline",
+      id: "workbench",
       icon: Mail,
-      render: (_worktreeId, payload) => {
-        const routineId = editorRoutineId(payload);
+      render: (worktreeId, payload) => {
+        const target = workbenchTarget(payload);
 
-        return routineId ? (
-          <PipelineEditor routineId={routineId} />
+        return target ? (
+          <RoutineWorkbench initialTarget={target} worktreeId={worktreeId} />
         ) : (
-          <Notice tone="error">Invalid Mailarr pipeline payload.</Notice>
+          <Notice tone="error">Invalid Mailarr workbench payload.</Notice>
         );
       },
     },
@@ -206,12 +303,30 @@ const mailarr: WebExtension = {
 };
 
 function MailarrPanel({ worktreeId }: { worktreeId: number }) {
+  const restored = panelViewState(worktreeId);
   const [routines, setRoutines] = useState<Routine[]>([]);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [editing, setEditing] = useState<Routine | "new" | null>(null);
-  const [reviewingFreeze, setReviewingFreeze] = useState<Routine | null>(null);
+  const [fallbackTarget, setFallbackTarget] = useState<WorkbenchTarget | null>(
+    restored.fallbackTarget,
+  );
+  const [lastOpenedRoutineId, setLastOpenedRoutineId] = useState<number | null>(
+    restored.lastOpenedRoutineId,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const rememberFallbackTarget = (target: WorkbenchTarget | null) => {
+    setFallbackTarget(target);
+    updatePanelViewState(worktreeId, (current) => ({
+      ...current,
+      fallbackTarget: target,
+    }));
+  };
+  const rememberLastOpened = (routineId: number | null) => {
+    setLastOpenedRoutineId(routineId);
+    updatePanelViewState(worktreeId, (current) => ({
+      ...current,
+      lastOpenedRoutineId: routineId,
+    }));
+  };
 
   const load = async () => {
     setLoading(true);
@@ -226,67 +341,19 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
     }
   };
 
-  const reviewFreeze = async (routineId: number) => {
-    try {
-      const result = await request<{ routine: Routine }>(
-        `/api/mailarr/routines/${routineId}`,
-      );
-
-      setReviewingFreeze(result.routine);
-      setError(null);
-    } catch (nextError) {
-      setError(message(nextError));
-    }
-  };
-
   useEffect(() => {
     void load();
   }, []);
 
-  if (editing) {
+  if (fallbackTarget) {
     return (
-      <RoutineEditor
-        routine={editing === "new" ? null : editing}
-        onCancel={() => setEditing(null)}
-        onSaved={async () => {
-          setEditing(null);
+      <RoutineWorkbench
+        initialTarget={fallbackTarget}
+        worktreeId={worktreeId}
+        onTargetChanged={rememberFallbackTarget}
+        onBack={async () => {
+          rememberFallbackTarget(null);
           await load();
-        }}
-      />
-    );
-  }
-
-  if (reviewingFreeze) {
-    return (
-      <FreezeReview
-        error={error}
-        routine={reviewingFreeze}
-        onCancel={() => setReviewingFreeze(null)}
-        onConfirm={() =>
-          mutate(
-            `/api/mailarr/routines/${reviewingFreeze.id}/freeze`,
-            {
-              frozen: true,
-              reviewedUpdatedAt: reviewingFreeze.updatedAt,
-            },
-            async () => {
-              setReviewingFreeze(null);
-              await load();
-            },
-            setError,
-          )
-        }
-      />
-    );
-  }
-
-  if (selected !== null) {
-    return (
-      <RoutineDetail
-        routineId={selected}
-        onBack={() => {
-          setSelected(null);
-          void load();
         }}
       />
     );
@@ -301,7 +368,11 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
         </div>
         <button
           className="rounded-md border border-border p-1.5 hover:bg-muted"
-          onClick={() => setEditing("new")}
+          onClick={() => {
+            if (!openRoutineWorkbench(worktreeId, null)) {
+              rememberFallbackTarget("new");
+            }
+          }}
           title="New routine"
         >
           <Plus size={16} />
@@ -316,190 +387,217 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
         </p>
       )}
 
-      <div className="space-y-2 overflow-auto">
-        {routines.map((routine) => (
-          <div
+      <RoutineList
+        routines={routines}
+        worktreeId={worktreeId}
+        lastOpenedRoutineId={lastOpenedRoutineId}
+        onOpen={(routine) => {
+          rememberLastOpened(routine.id);
+          if (!openRoutineWorkbench(worktreeId, routine)) {
+            rememberFallbackTarget(routine.id);
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+function RoutineList({
+  routines,
+  worktreeId,
+  lastOpenedRoutineId,
+  onOpen,
+}: {
+  routines: Routine[];
+  worktreeId: number;
+  lastOpenedRoutineId: number | null;
+  onOpen: (routine: Routine) => void;
+}) {
+  const useActiveKey = getEditorTabs()?.useActiveKey;
+
+  return typeof useActiveKey === "function" ? (
+    <FocusedRoutineList
+      routines={routines}
+      worktreeId={worktreeId}
+      useActiveKey={useActiveKey}
+      onOpen={onOpen}
+    />
+  ) : (
+    <RoutineRows
+      routines={routines}
+      activeRoutineId={lastOpenedRoutineId}
+      onOpen={onOpen}
+    />
+  );
+}
+
+function FocusedRoutineList({
+  routines,
+  worktreeId,
+  useActiveKey,
+  onOpen,
+}: {
+  routines: Routine[];
+  worktreeId: number;
+  useActiveKey: (
+    worktreeId: number,
+    ext: string,
+    editor: string,
+  ) => string | null;
+  onOpen: (routine: Routine) => void;
+}) {
+  const activeKey = useActiveKey(worktreeId, "mailarr", "workbench");
+
+  return (
+    <RoutineRows
+      routines={routines}
+      activeRoutineId={routineIdFromWorkbenchKey(activeKey)}
+      onOpen={onOpen}
+    />
+  );
+}
+
+function RoutineRows({
+  routines,
+  activeRoutineId,
+  onOpen,
+}: {
+  routines: Routine[];
+  activeRoutineId: number | null;
+  onOpen: (routine: Routine) => void;
+}) {
+  return (
+    <div className="space-y-1.5 overflow-auto">
+      {routines.map((routine) => {
+        const active = routine.id === activeRoutineId;
+        const failed = routine.lastRun?.status === "failed";
+
+        return (
+          <button
             key={routine.id}
-            className={`rounded-md border p-3 ${
-              routine.lastRun?.status === "failed"
-                ? "border-destructive"
-                : "border-border"
+            className={`w-full rounded-md border p-2.5 text-left outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 ${
+              active && failed
+                ? "border-destructive bg-primary/10 ring-1 ring-primary/50"
+                : active
+                ? "border-primary bg-primary/10"
+                : failed
+                  ? "border-destructive bg-destructive/5"
+                  : "border-border hover:bg-muted/40"
             }`}
+            type="button"
+            onClick={() => onOpen(routine)}
           >
-            <button
-              className="w-full text-left"
-              onClick={() => {
-                if (!openPipelineEditor(worktreeId, routine)) {
-                  setSelected(routine.id);
-                }
-              }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-sm font-medium">
-                    {routine.name}
-                  </span>
-                  <FreezeBadge frozen={routine.frozen} />
-                  {routine.editedSinceFreeze && !routine.frozen && (
-                    <EditedSinceFreezeBadge />
-                  )}
+            <div className="flex items-start justify-between gap-2">
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-medium">
+                  {routine.name}
                 </span>
-                <span className="text-[11px] text-muted-foreground">{routine.cron}</span>
-              </div>
-              {!routine.frozen && (
-                <p className="mt-2 text-xs text-amber-500">
-                  Sends are disabled while unlocked.
-                </p>
-              )}
-              {routine.session ? (
-                <p className="mt-2 text-xs font-medium text-foreground">
-                  agent: {routine.sessionLabel ?? "unlabelled"} ({routine.session})
-                </p>
-              ) : (
-                <p className="mt-2 text-xs text-muted-foreground">unbound</p>
-              )}
-              <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
-                <span>{routine.newLeads} open</span>
-                <span>
-                  {routine.sentToday}/{routine.dailyCap} today
+                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                  agent: {routine.sessionLabel ?? (routine.session ? "unlabelled" : "unbound")}
                 </span>
-                <span>{routine.lastRun?.status ?? "not run"}</span>
-              </div>
-            </button>
-            <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
-              <div className="flex flex-wrap gap-3">
-                <Toggle
-                  checked={routine.enabled}
-                  label="Enabled"
-                  onChange={(enabled) =>
-                    void mutate(
-                      `/api/mailarr/routines/${routine.id}/toggle`,
-                      { enabled },
-                      load,
-                      setError,
-                    )
-                  }
-                />
-                <button
-                  className="rounded-md border border-border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
-                  type="button"
-                  onClick={() =>
-                    routine.frozen
-                      ? void mutate(
-                          `/api/mailarr/routines/${routine.id}/freeze`,
-                          { frozen: false },
-                          load,
-                          setError,
-                        )
-                      : void reviewFreeze(routine.id)
-                  }
-                >
-                  {routine.frozen ? "Unfreeze" : "Review and freeze"}
-                </button>
-              </div>
-              <div className="flex gap-1">
-                <IconButton
-                  title="Edit"
-                  onClick={() => setEditing(routine)}
-                  icon={<Settings2 size={14} />}
-                />
-                <IconButton
-                  title={
-                    routine.hasPendingRun
-                      ? "A run is already pending for this routine"
-                      : "Run now"
-                  }
-                  disabled={routine.hasPendingRun}
-                  onClick={() =>
-                    void mutate(
-                      `/api/mailarr/routines/${routine.id}/run`,
-                      {},
-                      load,
-                      setError,
-                    )
-                  }
-                  icon={<Play size={14} />}
-                />
-                {routine.pendingRun && (
-                  <>
-                    <span className="self-center text-[11px] text-muted-foreground">
-                      pending {pendingAge(routine.pendingRun.createdAt)}
-                    </span>
-                    <IconButton
-                      title="Cancel pending run"
-                      onClick={() =>
-                        void mutate(
-                          `/api/mailarr/routines/${routine.id}/cancel-pending`,
-                          {},
-                          load,
-                          setError,
-                        )
-                      }
-                      icon={<XCircle size={14} />}
-                    />
-                    {routine.pendingRunCount > 1 && (
-                      <button
-                        className="rounded-md border border-destructive/50 px-1.5 text-[11px] text-destructive outline-none hover:bg-destructive/10 focus-visible:ring-3 focus-visible:ring-ring/50"
-                        type="button"
-                        title={`Cancel all ${routine.pendingRunCount} pending runs`}
-                        onClick={() =>
-                          void mutate(
-                            `/api/mailarr/routines/${routine.id}/cancel-pending`,
-                            { all: true },
-                            load,
-                            setError,
-                          )
-                        }
-                      >
-                        all
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
+              </span>
+              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                {routine.cron}
+              </span>
             </div>
-          </div>
-        ))}
-      </div>
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              <FreezeBadge frozen={routine.frozen} />
+              {routine.editedSinceFreeze && <EditedSinceFreezeBadge compact />}
+              <StateBadge enabled={routine.enabled} />
+            </div>
+            <div
+              className={`mt-2 flex items-center justify-between gap-2 text-[10px] ${
+                failed ? "text-destructive" : "text-muted-foreground"
+              }`}
+            >
+              <span>{routine.newLeads} open</span>
+              <span>
+                {routine.sentToday}/{routine.dailyCap} sent
+              </span>
+              <span>{routine.lastRun?.status ?? "not run"}</span>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
 function RoutineEditor({
   routine,
+  worktreeId,
   onCancel,
   onSaved,
 }: {
   routine: Routine | null;
+  worktreeId: number;
   onCancel: () => void;
-  onSaved: () => Promise<void>;
+  onSaved: (routine: Routine) => Promise<void>;
 }) {
-  const [value, setValue] = useState<RoutineForm>(
-    routine
-      ? {
-          name: routine.name,
-          cron: routine.cron,
-          orderText: routine.orderText,
-          session: routine.session ?? "",
-          sessionLabel: routine.sessionLabel ?? "",
-          dailyCap: routine.dailyCap,
-          verbatimTerms: routine.verbatimTerms,
-          blockedTopics: routine.blockedTopics.join("\n"),
-          requiredDisclosure: routine.requiredDisclosure ?? "",
-          keywords: routine.keywords
-            ? Object.entries(routine.keywords).map(([term, weight], id) => ({
-                id,
-                term,
-                weight: String(weight),
-              }))
-            : [],
-          scoreFloor: routine.scoreFloor?.toString() ?? "",
-        }
-      : EMPTY_FORM,
+  const formKey = workbenchStateKey(routine?.id ?? "new");
+  const stored = panelViewState(worktreeId).forms[formKey];
+  const reviewedUpdatedAt = stored?.reviewedUpdatedAt ?? routine?.updatedAt ?? null;
+  const [value, setValueState] = useState<RoutineForm>(
+    stored?.value ??
+      (routine
+        ? {
+            name: routine.name,
+            cron: routine.cron,
+            orderText: routine.orderText,
+            session: routine.session ?? "",
+            sessionLabel: routine.sessionLabel ?? "",
+            dailyCap: routine.dailyCap,
+            verbatimTerms: routine.verbatimTerms,
+            blockedTopics: routine.blockedTopics.join("\n"),
+            requiredDisclosure: routine.requiredDisclosure ?? "",
+            keywords: routine.keywords
+              ? Object.entries(routine.keywords).map(([term, weight], id) => ({
+                  id,
+                  term,
+                  weight: String(weight),
+                }))
+              : [],
+            scoreFloor: routine.scoreFloor?.toString() ?? "",
+          }
+        : EMPTY_FORM),
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasKeywords = value.keywords.some(({ term }) => term.trim());
+  const setValue: React.Dispatch<React.SetStateAction<RoutineForm>> = (next) => {
+    setValueState((current) => {
+      const resolved =
+        typeof next === "function"
+          ? (next as (current: RoutineForm) => RoutineForm)(current)
+          : next;
+
+      updatePanelViewState(worktreeId, (panel) => ({
+        ...panel,
+        forms: {
+          ...panel.forms,
+          [formKey]: {
+            value: resolved,
+            reviewedUpdatedAt,
+          },
+        },
+      }));
+
+      return resolved;
+    });
+  };
+  const clearDraft = () => {
+    updatePanelViewState(worktreeId, (panel) => {
+      const forms = { ...panel.forms };
+
+      delete forms[formKey];
+
+      return { ...panel, forms };
+    });
+  };
+  const cancel = () => {
+    clearDraft();
+    onCancel();
+  };
 
   const save = async () => {
     setSaving(true);
@@ -521,9 +619,10 @@ function RoutineEditor({
         keywords,
         scoreFloor:
           keywords && value.scoreFloor.trim() ? Number(value.scoreFloor) : null,
+        ...(routine ? { reviewedUpdatedAt } : {}),
       };
 
-      await request(
+      const result = await request<{ routine: Routine }>(
         routine ? `/api/mailarr/routines/${routine.id}` : "/api/mailarr/routines",
         {
           method: routine ? "PUT" : "POST",
@@ -531,7 +630,8 @@ function RoutineEditor({
           body: JSON.stringify(body),
         },
       );
-      await onSaved();
+      clearDraft();
+      await onSaved(result.routine);
     } catch (nextError) {
       setError(message(nextError));
     } finally {
@@ -543,7 +643,7 @@ function RoutineEditor({
     <div className="flex h-full flex-col gap-2 overflow-auto p-3 text-foreground">
       <Header
         title={routine ? `Edit ${routine.name}` : "New routine"}
-        onBack={onCancel}
+        onBack={cancel}
       />
       {error && <Notice tone="error">{error}</Notice>}
       <FormSection title="Basics">
@@ -778,144 +878,77 @@ function RoutineEditor({
   );
 }
 
-function RoutineDetail({
-  routineId,
+function RoutineWorkbench({
+  initialTarget,
   onBack,
+  onTargetChanged,
+  worktreeId,
 }: {
-  routineId: number;
-  onBack: () => void;
+  initialTarget: WorkbenchTarget;
+  onBack?: () => Promise<void>;
+  onTargetChanged?: (target: WorkbenchTarget) => void;
+  worktreeId: number;
 }) {
-  const [pipeline, setPipeline] = useState<Pipeline | null>(null);
-  const [stage, setStage] = useState<"all" | Stage>("all");
-  const [expanded, setExpanded] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    request<Pipeline>(
-      `/api/mailarr/routines/${routineId}/pipeline?stage=${stage}`,
-    )
-      .then(setPipeline)
-      .catch((nextError) => setError(message(nextError)));
-  }, [routineId, stage]);
-
-  return (
-    <div className="flex h-full flex-col gap-3 overflow-auto p-3 text-foreground">
-      <Header title={pipeline?.routine.name ?? "Routine"} onBack={onBack} />
-      {error && <Notice tone="error">{error}</Notice>}
-      {!pipeline && !error && (
-        <p className="text-xs text-muted-foreground">Loading...</p>
-      )}
-      {pipeline && (
-        <>
-          <section className="rounded-md border border-border p-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wide">Sources</h3>
-            {pipeline.sources.length === 0 ? (
-              <p className="mt-2 text-xs text-muted-foreground">No sources configured.</p>
-            ) : (
-              <div className="mt-2 space-y-2">
-                {[...pipeline.sources]
-                  .sort(
-                    (left, right) =>
-                      SOURCE_STATUS_ORDER[left.status] -
-                        SOURCE_STATUS_ORDER[right.status] ||
-                      left.name.localeCompare(right.name),
-                  )
-                  .map((source) => (
-                    <div key={source.name} className="text-xs">
-                      <div className="flex items-center gap-2">
-                        <a
-                          className="min-w-0 flex-1 truncate font-medium underline"
-                          href={source.url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {source.name}
-                        </a>
-                        <span
-                          className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${SOURCE_STATUS_CLASS[source.status]}`}
-                        >
-                          {source.status}
-                        </span>
-                      </div>
-                      {source.notes && (
-                        <p className="text-muted-foreground">{source.notes}</p>
-                      )}
-                    </div>
-                  ))}
-              </div>
-            )}
-          </section>
-          {pipeline.briefing && (
-            <section className="rounded-md border border-border p-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wide">
-                Latest briefing
-              </h3>
-              <pre className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">
-                {pipeline.briefing.markdown}
-              </pre>
-            </section>
-          )}
-          <div className="flex gap-1 overflow-x-auto">
-            {STAGES.map((entry) => (
-              <button
-                key={entry}
-                className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs leading-5 ${
-                  stage === entry
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border text-muted-foreground"
-                }`}
-                onClick={() => setStage(entry)}
-              >
-                <span>{entry}</span>
-                <span className={stage === entry ? "opacity-80" : "opacity-60"}>
-                  {pipeline.counts[entry]}
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="space-y-2">
-            {pipeline.items.map((item) => (
-              <button
-                key={item.id}
-                className="w-full rounded-md border border-border p-3 text-left"
-                onClick={() => setExpanded(expanded === item.id ? null : item.id)}
-              >
-                <div className="flex justify-between gap-2">
-                  <span className="text-sm font-medium">{item.company}</span>
-                  <span className="text-[11px] text-muted-foreground">{item.stage}</span>
-                </div>
-                <p className="text-xs text-muted-foreground">{item.role}</p>
-                {expanded === item.id && (
-                  <div className="mt-3 space-y-2 border-t border-border pt-2 text-xs">
-                    <p>Source: {item.source}</p>
-                    <p>Score: {item.score}</p>
-                    {item.contactEmail && <p>Contact: {item.contactEmail}</p>}
-                    {item.fitNotes && <p>Notes: {item.fitNotes}</p>}
-                    {item.dropReason && <p>Drop: {item.dropReason}</p>}
-                    {(item.sentPitch ?? item.draftPitch) && (
-                      <pre className="whitespace-pre-wrap rounded bg-muted p-2">
-                        {item.sentPitch ?? item.draftPitch}
-                      </pre>
-                    )}
-                  </div>
-                )}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
+  const restored =
+    panelViewState(worktreeId).workbenches[workbenchStateKey(initialTarget)] ??
+    defaultWorkbenchState(initialTarget);
+  const [routineId, setRoutineId] = useState<number | null>(
+    initialTarget === "new" ? null : initialTarget,
   );
-}
-
-function PipelineEditor({ routineId }: { routineId: number }) {
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
-  const [stage, setStage] = useState<"all" | Stage>("all");
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [stage, setStage] = useState<"all" | Stage>(restored.stage);
+  const [expanded, setExpanded] = useState<number | null>(
+    restored.expandedItemId,
+  );
   const [error, setError] = useState<string | null>(null);
-  const [reviewingFreeze, setReviewingFreeze] = useState(false);
+  const [reviewingFreeze, setReviewingFreeze] = useState(
+    restored.reviewingFreeze,
+  );
+  const [briefingExpanded, setBriefingExpanded] = useState(
+    restored.briefingExpanded,
+  );
+  const [view, setView] = useState<"pipeline" | "edit">(restored.view);
+  const rememberWorkbench = (
+    target: WorkbenchTarget,
+    patch: Partial<WorkbenchViewState>,
+  ) => {
+    updatePanelViewState(worktreeId, (current) => ({
+      ...current,
+      workbenches: {
+        ...current.workbenches,
+        [workbenchStateKey(target)]: {
+          ...(current.workbenches[workbenchStateKey(target)] ??
+            defaultWorkbenchState(target)),
+          ...patch,
+        },
+      },
+    }));
+  };
+  const currentTarget = (): WorkbenchTarget => routineId ?? "new";
+  const rememberStage = (nextStage: "all" | Stage) => {
+    setStage(nextStage);
+    rememberWorkbench(currentTarget(), { stage: nextStage });
+  };
+  const rememberExpanded = (itemId: number | null) => {
+    setExpanded(itemId);
+    rememberWorkbench(currentTarget(), { expandedItemId: itemId });
+  };
+  const rememberReviewingFreeze = (reviewing: boolean) => {
+    setReviewingFreeze(reviewing);
+    rememberWorkbench(currentTarget(), { reviewingFreeze: reviewing });
+  };
+  const rememberBriefingExpanded = (expanded: boolean) => {
+    setBriefingExpanded(expanded);
+    rememberWorkbench(currentTarget(), { briefingExpanded: expanded });
+  };
+  const rememberView = (nextView: "pipeline" | "edit") => {
+    setView(nextView);
+    rememberWorkbench(currentTarget(), { view: nextView });
+  };
 
   const load = async () => {
+    if (routineId === null) return;
+
     try {
       const nextPipeline = await request<Pipeline>(
         `/api/mailarr/routines/${routineId}/pipeline?stage=${stage}`,
@@ -928,6 +961,8 @@ function PipelineEditor({ routineId }: { routineId: number }) {
   };
 
   const reviewFreeze = async () => {
+    if (routineId === null) return;
+
     try {
       const result = await request<{ routine: Routine }>(
         `/api/mailarr/routines/${routineId}`,
@@ -941,7 +976,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
             }
           : current,
       );
-      setReviewingFreeze(true);
+      rememberReviewingFreeze(true);
       setError(null);
     } catch (nextError) {
       setError(message(nextError));
@@ -952,16 +987,50 @@ function PipelineEditor({ routineId }: { routineId: number }) {
     void load();
   }, [routineId, stage]);
 
-  if (error && !reviewingFreeze) {
+  if (routineId === null) {
     return (
-      <div className="p-4">
-        <Notice tone="error">{error}</Notice>
-      </div>
+      <RoutineEditor
+        worktreeId={worktreeId}
+        routine={null}
+        onCancel={() => {
+          if (onBack) {
+            void onBack();
+          } else {
+            closeRoutineWorkbench(worktreeId, "routine:new");
+          }
+        }}
+        onSaved={async (routine) => {
+          setRoutineId(routine.id);
+          setView("pipeline");
+          updatePanelViewState(worktreeId, (current) => {
+            const workbenches = { ...current.workbenches };
+
+            delete workbenches.new;
+            workbenches[workbenchStateKey(routine.id)] = defaultWorkbenchState(
+              routine.id,
+            );
+
+            return { ...current, workbenches };
+          });
+          onTargetChanged?.(routine.id);
+          if (openRoutineWorkbench(worktreeId, routine)) {
+            closeRoutineWorkbench(worktreeId, "routine:new");
+          }
+        }}
+      />
     );
   }
 
   if (!pipeline) {
-    return <p className="p-4 text-sm text-muted-foreground">Loading pipeline...</p>;
+    return (
+      <div className="p-4">
+        {error ? (
+          <Notice tone="error">{error}</Notice>
+        ) : (
+          <p className="text-sm text-muted-foreground">Loading workbench...</p>
+        )}
+      </div>
+    );
   }
 
   if (reviewingFreeze) {
@@ -970,7 +1039,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
         error={error}
         routine={pipeline.routine}
         onCancel={() => {
-          setReviewingFreeze(false);
+          rememberReviewingFreeze(false);
           setError(null);
         }}
         onConfirm={() =>
@@ -981,7 +1050,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
               reviewedUpdatedAt: pipeline.routine.updatedAt,
             },
             async () => {
-              setReviewingFreeze(false);
+              rememberReviewingFreeze(false);
               await load();
             },
             setError,
@@ -991,23 +1060,41 @@ function PipelineEditor({ routineId }: { routineId: number }) {
     );
   }
 
+  if (view === "edit") {
+    return (
+      <RoutineEditor
+        key={`${pipeline.routine.id}:${pipeline.routine.updatedAt}`}
+        worktreeId={worktreeId}
+        routine={pipeline.routine}
+        onCancel={() => rememberView("pipeline")}
+        onSaved={async (routine) => {
+          setPipeline((current) =>
+            current ? { ...current, routine: { ...current.routine, ...routine } } : current,
+          );
+          rememberView("pipeline");
+          await load();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-auto p-4 text-foreground">
+      {error && <Notice tone="error">{error}</Notice>}
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
         <div>
           <div className="flex flex-wrap items-center gap-2">
+            {onBack && (
+              <IconButton
+                title="Back to routines"
+                onClick={() => void onBack()}
+                icon={<ArrowLeft size={15} />}
+              />
+            )}
             <h2 className="text-lg font-semibold">{pipeline.routine.name}</h2>
-            <span
-              className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${
-                pipeline.routine.enabled
-                  ? "border-emerald-500/50 text-emerald-500"
-                  : "border-border text-muted-foreground"
-              }`}
-            >
-              {pipeline.routine.enabled ? "enabled" : "disabled"}
-            </span>
+            <StateBadge enabled={pipeline.routine.enabled} />
             <FreezeBadge frozen={pipeline.routine.frozen} />
-            {pipeline.routine.editedSinceFreeze && !pipeline.routine.frozen && (
+            {pipeline.routine.editedSinceFreeze && (
               <EditedSinceFreezeBadge />
             )}
           </div>
@@ -1024,6 +1111,26 @@ function PipelineEditor({ routineId }: { routineId: number }) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Toggle
+            checked={pipeline.routine.enabled}
+            label="Enabled"
+            onChange={(enabled) =>
+              void mutate(
+                `/api/mailarr/routines/${pipeline.routine.id}/toggle`,
+                { enabled },
+                load,
+                setError,
+              )
+            }
+          />
+          <button
+            className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+            type="button"
+            onClick={() => rememberView("edit")}
+          >
+            <Settings2 size={15} />
+            Edit routine
+          </button>
           <button
             className="rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
             type="button"
@@ -1110,28 +1217,12 @@ function PipelineEditor({ routineId }: { routineId: number }) {
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
-        <section className="rounded-md border border-border bg-background p-4">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Latest briefing
-            </h3>
-            {pipeline.briefing && (
-              <span className="text-xs text-muted-foreground">
-                {new Date(pipeline.briefing.createdAt).toLocaleString()}
-              </span>
-            )}
-          </div>
-          {pipeline.briefing ? (
-            <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed">
-              {pipeline.briefing.markdown}
-            </div>
-          ) : (
-            <p className="mt-3 text-sm text-muted-foreground">
-              No briefing posted yet.
-            </p>
-          )}
-        </section>
+      <div className="order-3 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
+        <BriefingSection
+          briefing={pipeline.briefing}
+          expanded={briefingExpanded}
+          onExpandedChange={rememberBriefingExpanded}
+        />
 
         <div className="grid gap-4">
           <section className="rounded-md border border-border bg-background p-4">
@@ -1201,7 +1292,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
         </div>
       </div>
 
-      <div className="flex gap-1 overflow-x-auto">
+      <div className="order-1 flex gap-1 overflow-x-auto">
         {STAGES.map((entry) => (
           <button
             key={entry}
@@ -1211,7 +1302,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
                 : "border-border text-muted-foreground hover:text-foreground"
             }`}
             type="button"
-            onClick={() => setStage(entry)}
+            onClick={() => rememberStage(entry)}
           >
             <span>{entry}</span>
             <span className={stage === entry ? "opacity-80" : "opacity-60"}>
@@ -1221,21 +1312,24 @@ function PipelineEditor({ routineId }: { routineId: number }) {
         ))}
       </div>
 
-      <div className="min-w-[760px] overflow-hidden rounded-md border border-border bg-background">
-        <div className="grid grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_120px] gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
+      <div className="order-2 min-w-[820px] overflow-hidden rounded-md border border-border bg-background">
+        <div className="grid grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_70px_120px] gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
           <span />
           <span>Company</span>
           <span>Role</span>
           <span>Rate</span>
           <span>Stage</span>
+          <span>Email</span>
           <span>Source</span>
         </div>
         {pipeline.items.map((item) => (
           <div key={item.id} className="border-t border-border">
             <button
-              className="grid w-full grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_120px] gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
+              className="grid w-full grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_70px_120px] gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
               type="button"
-              onClick={() => setExpanded(expanded === item.id ? null : item.id)}
+              onClick={() =>
+                rememberExpanded(expanded === item.id ? null : item.id)
+              }
             >
               {expanded === item.id ? (
                 <ChevronDown size={16} className="text-muted-foreground" />
@@ -1248,6 +1342,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
                 {item.rateInfo || "Not listed"}
               </span>
               <span className="text-muted-foreground">{item.stage}</span>
+              <EmailStateBadge item={item} />
               <span className="truncate text-muted-foreground">{item.source}</span>
             </button>
             {expanded === item.id && <PipelineItemDetail item={item} />}
@@ -1263,7 +1358,241 @@ function PipelineEditor({ routineId }: { routineId: number }) {
   );
 }
 
+function BriefingSection({
+  briefing,
+  expanded,
+  onExpandedChange,
+}: {
+  briefing: Pipeline["briefing"];
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+}) {
+  return (
+    <section className="self-start overflow-hidden rounded-md border border-border bg-background">
+      <button
+        className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
+        type="button"
+        onClick={() => briefing && onExpandedChange(!expanded)}
+        aria-expanded={briefing ? expanded : undefined}
+      >
+        {briefing ? (
+          expanded ? (
+            <ChevronDown size={16} className="shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight size={16} className="shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <span className="w-4 shrink-0" />
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Latest briefing
+          </span>
+          <span className="mt-1 block truncate text-sm text-foreground">
+            {briefing ? briefingSummary(briefing.markdown) : "No briefing posted yet."}
+          </span>
+        </span>
+        {briefing && (
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {new Date(briefing.createdAt).toLocaleString()}
+          </span>
+        )}
+      </button>
+      {briefing && expanded && (
+        <div className="border-t border-border">
+          <BriefingMarkdown markdown={briefing.markdown} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function BriefingMarkdown({ markdown }: { markdown: string }) {
+  const MarkdownView = getHostMarkdownView();
+
+  return MarkdownView ? (
+    <MarkdownView
+      content={markdown}
+      mode="rendered"
+      preset="docs"
+      className="text-sm"
+    />
+  ) : (
+    <MinimalMarkdown markdown={markdown} />
+  );
+}
+
+function getHostMarkdownView():
+  | React.ComponentType<{
+      content: string;
+      mode?: "rendered" | "source";
+      preset?: "docs" | "chat";
+      className?: string;
+    }>
+  | null {
+  if (typeof window === "undefined") return null;
+
+  return (
+    window as typeof window & {
+      __QUBE_SHARED__?: {
+        ui?: {
+          MarkdownView?: React.ComponentType<{
+            content: string;
+            mode?: "rendered" | "source";
+            preset?: "docs" | "chat";
+            className?: string;
+          }>;
+        };
+      };
+    }
+  ).__QUBE_SHARED__?.ui?.MarkdownView ?? null;
+}
+
+function MinimalMarkdown({ markdown }: { markdown: string }) {
+  const lines = markdown.split(/\r?\n/u);
+  const blocks: React.ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index].trim();
+
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.+)$/u.exec(line);
+
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push(
+        <div
+          key={`heading:${index}`}
+          className={level <= 2 ? "text-base font-semibold" : "text-sm font-semibold"}
+          role="heading"
+          aria-level={level}
+        >
+          {renderInlineMarkdown(heading[2], `heading:${index}`)}
+        </div>,
+      );
+      index += 1;
+      continue;
+    }
+
+    const list = /^(\d+\.\s+|[-*+]\s+)(.+)$/u.exec(line);
+
+    if (list) {
+      const ordered = /^\d+\./u.test(list[1]);
+      const items: React.ReactNode[] = [];
+
+      while (index < lines.length) {
+        const next = /^(\d+\.\s+|[-*+]\s+)(.+)$/u.exec(lines[index].trim());
+
+        if (!next || /^\d+\./u.test(next[1]) !== ordered) break;
+        items.push(
+          <li key={`item:${index}`}>
+            {renderInlineMarkdown(next[2], `item:${index}`)}
+          </li>,
+        );
+        index += 1;
+      }
+
+      blocks.push(
+        ordered ? (
+          <ol key={`list:${index}`} className="list-decimal space-y-1 pl-5">
+            {items}
+          </ol>
+        ) : (
+          <ul key={`list:${index}`} className="list-disc space-y-1 pl-5">
+            {items}
+          </ul>
+        ),
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [];
+
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^(#{1,6})\s+/u.test(lines[index].trim()) &&
+      !/^(\d+\.\s+|[-*+]\s+)/u.test(lines[index].trim())
+    ) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+
+    blocks.push(
+      <p key={`paragraph:${index}`}>
+        {renderInlineMarkdown(paragraph.join(" "), `paragraph:${index}`)}
+      </p>,
+    );
+  }
+
+  return (
+    <div className="space-y-3 px-4 py-3 text-sm leading-relaxed text-foreground">
+      {blocks}
+    </div>
+  );
+}
+
+function renderInlineMarkdown(text: string, key: string): React.ReactNode[] {
+  const tokens = text.split(/(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/gu);
+
+  return tokens.filter(Boolean).map((token, index) => {
+    const tokenKey = `${key}:${index}`;
+
+    if (token.startsWith("`") && token.endsWith("`")) {
+      return (
+        <code key={tokenKey} className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+          {token.slice(1, -1)}
+        </code>
+      );
+    }
+    if (
+      (token.startsWith("**") && token.endsWith("**")) ||
+      (token.startsWith("__") && token.endsWith("__"))
+    ) {
+      return <strong key={tokenKey}>{token.slice(2, -2)}</strong>;
+    }
+    if (
+      (token.startsWith("*") && token.endsWith("*")) ||
+      (token.startsWith("_") && token.endsWith("_"))
+    ) {
+      return <em key={tokenKey}>{token.slice(1, -1)}</em>;
+    }
+
+    return token;
+  });
+}
+
+function EmailStateBadge({ item }: { item: Item }) {
+  const sent = Boolean(item.sentPitch || item.sentSubject);
+  const drafted = Boolean(item.draftPitch || item.draftSubject);
+
+  if (!sent && !drafted) {
+    return <span className="text-xs text-muted-foreground">none</span>;
+  }
+
+  return (
+    <span
+      className={`w-fit rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+        sent
+          ? "border-emerald-500/50 text-emerald-500"
+          : "border-amber-500/50 text-amber-500"
+      }`}
+    >
+      {sent ? "sent" : "draft"}
+    </span>
+  );
+}
+
 function PipelineItemDetail({ item }: { item: Item }) {
+  const sent = Boolean(item.sentPitch || item.sentSubject);
+  const subject = sent ? item.sentSubject : item.draftSubject;
+  const body = sent ? item.sentPitch : item.draftPitch;
+
   return (
     <div className="grid gap-4 border-t border-border bg-muted/15 px-10 py-4 text-sm md:grid-cols-2">
       <PipelineField label="Score" value={String(item.score)} />
@@ -1273,16 +1602,18 @@ function PipelineItemDetail({ item }: { item: Item }) {
       />
       <PipelineField label="Fit notes" value={item.fitNotes ?? "None"} />
       <PipelineField label="Drop reason" value={item.dropReason ?? "None"} />
-      <PipelineField
-        label="Draft pitch"
-        value={item.draftPitch ?? "None"}
-        wide
-      />
-      <PipelineField
-        label="Sent pitch"
-        value={item.sentPitch ?? "None"}
-        wide
-      />
+      <section className="rounded-md border border-border bg-background p-4 md:col-span-2">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">
+            {sent ? "Sent email" : "Draft email"}
+          </h3>
+          <EmailStateBadge item={item} />
+        </div>
+        <PipelineField label="Subject" value={subject ?? "not drafted yet"} />
+        <div className="mt-4">
+          <PipelineField label="Body" value={body ?? "not drafted yet"} />
+        </div>
+      </section>
       <a
         className="text-primary underline"
         href={item.url}
@@ -1335,10 +1666,24 @@ function FreezeBadge({ frozen }: { frozen: boolean }) {
   );
 }
 
-function EditedSinceFreezeBadge() {
+function StateBadge({ enabled }: { enabled: boolean }) {
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+        enabled
+          ? "border-emerald-500/50 text-emerald-500"
+          : "border-border text-muted-foreground"
+      }`}
+    >
+      {enabled ? "enabled" : "disabled"}
+    </span>
+  );
+}
+
+function EditedSinceFreezeBadge({ compact = false }: { compact?: boolean }) {
   return (
     <span className="shrink-0 rounded-full border border-amber-500/50 px-2 py-0.5 text-[10px] font-medium text-amber-500">
-      content edited since last freeze
+      {compact ? "edited" : "content edited since last freeze"}
     </span>
   );
 }
@@ -1540,40 +1885,57 @@ async function mutate(
   }
 }
 
-export function openPipelineEditor(
-  worktreeId: number,
-  routine: Pick<Routine, "id" | "name">,
-): boolean {
-  if (typeof window === "undefined") return false;
+interface EditorTabsApi {
+  open?: (
+    worktreeId: number,
+    spec: {
+      ext: string;
+      editor: string;
+      key: string;
+      title: string;
+      payload: unknown;
+    },
+  ) => void;
+  close?: (
+    worktreeId: number,
+    ref: {
+      ext: string;
+      editor: string;
+      key: string;
+    },
+  ) => void;
+  useActiveKey?: (
+    worktreeId: number,
+    ext: string,
+    editor: string,
+  ) => string | null;
+}
 
-  const editorTabs = (
+function getEditorTabs(): EditorTabsApi | null {
+  if (typeof window === "undefined") return null;
+
+  return (
     window as typeof window & {
-      __QUBE_SHARED__?: {
-        editorTabs?: {
-          open?: (
-            id: number,
-            spec: {
-              ext: string;
-              editor: string;
-              key: string;
-              title: string;
-              payload: unknown;
-            },
-          ) => void;
-        };
-      };
+      __QUBE_SHARED__?: { editorTabs?: EditorTabsApi };
     }
-  ).__QUBE_SHARED__?.editorTabs;
+  ).__QUBE_SHARED__?.editorTabs ?? null;
+}
+
+export function openRoutineWorkbench(
+  worktreeId: number,
+  routine: Pick<Routine, "id" | "name"> | null,
+): boolean {
+  const editorTabs = getEditorTabs();
 
   if (typeof editorTabs?.open !== "function") return false;
 
   try {
     editorTabs.open(worktreeId, {
       ext: "mailarr",
-      editor: "pipeline",
-      key: `routine:${routine.id}`,
-      title: routine.name,
-      payload: { routineId: routine.id },
+      editor: "workbench",
+      key: routine ? `routine:${routine.id}` : "routine:new",
+      title: routine?.name ?? "New routine",
+      payload: routine ? { routineId: routine.id } : { mode: "new" },
     });
 
     return true;
@@ -1582,12 +1944,42 @@ export function openPipelineEditor(
   }
 }
 
-export function editorRoutineId(payload: unknown): number | null {
-  if (!payload || typeof payload !== "object" || !("routineId" in payload)) {
+function closeRoutineWorkbench(worktreeId: number, key: string): void {
+  const close = getEditorTabs()?.close;
+
+  if (typeof close !== "function") return;
+
+  try {
+    close(worktreeId, {
+      ext: "mailarr",
+      editor: "workbench",
+      key,
+    });
+  } catch {
+    return;
+  }
+}
+
+export function workbenchTarget(payload: unknown): number | "new" | null {
+  if (!payload || typeof payload !== "object") {
     return null;
   }
 
+  if ("mode" in payload && (payload as { mode: unknown }).mode === "new") {
+    return "new";
+  }
+
+  if (!("routineId" in payload)) return null;
+
   const routineId = Number((payload as { routineId: unknown }).routineId);
+
+  return Number.isInteger(routineId) && routineId > 0 ? routineId : null;
+}
+
+export function routineIdFromWorkbenchKey(key: string | null): number | null {
+  if (!key?.startsWith("routine:")) return null;
+
+  const routineId = Number(key.slice("routine:".length));
 
   return Number.isInteger(routineId) && routineId > 0 ? routineId : null;
 }

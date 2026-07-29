@@ -44,7 +44,7 @@ export const MAILARR_INSTRUCTIONS = [
   "4. Manage routine sources when the order requests it, then fetch them yourself.",
   "5. Submit fetched contacts with items_add.",
   "6. Page through items_list and qualify with item_update.",
-  "7. Draft one message per qualified contact using the routine disclosure and {{TERMS}} once.",
+  "7. Store one draft subject and body per qualified contact with item_update, using the routine disclosure and {{TERMS}} once.",
   "8. Call send_first_contact until the routine cap is reached.",
   "9. Call post_briefing, then run_finish.",
   "",
@@ -291,23 +291,33 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "item_update",
     {
       description:
-        "Move an item through the pipeline and attach notes, a draft, contact email, or drop reason.",
+        "Move an item through the pipeline and attach notes, a draft subject and body, contact email, or drop reason.",
       inputSchema: {
         item_id: z.number().int().positive(),
         stage: z.enum(ITEM_STAGES).optional(),
         fit_notes: z.string().nullable().optional(),
+        draft_subject: z.string().nullable().optional(),
         draft_pitch: z.string().nullable().optional(),
         drop_reason: z.string().nullable().optional(),
         contact_email: z.string().email().nullable().optional(),
       },
     },
-    ({ item_id, stage, fit_notes, draft_pitch, drop_reason, contact_email }) =>
+    ({
+      item_id,
+      stage,
+      fit_notes,
+      draft_subject,
+      draft_pitch,
+      drop_reason,
+      contact_email,
+    }) =>
       withDb(
         ctx,
         (db) =>
           updateItem(db, item_id, {
             stage,
             fitNotes: fit_notes,
+            draftSubject: draft_subject,
             draftPitch: draft_pitch,
             dropReason: drop_reason,
             contactEmail: contact_email,
@@ -320,12 +330,12 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "send_first_contact",
     {
       description:
-        "The only mail egress. Requires a frozen routine, a qualified item, and a draft containing {{TERMS}} exactly once.",
+        "The only mail egress. Requires a frozen routine, a qualified item, and a draft containing {{TERMS}} exactly once. Uses the stored draft subject when subject is omitted.",
       inputSchema: {
         run_id: z.number().int().positive(),
         item_id: z.number().int().positive(),
         to: z.string().email().optional(),
-        subject: z.string().min(1),
+        subject: z.string().min(1).optional(),
         pitch: z.string().min(1),
       },
     },

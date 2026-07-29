@@ -65,13 +65,13 @@ export function initializeSchema(db: DatabaseSync): void {
         .user_version,
     );
 
-    if (version === 1) {
+    if (version === 2) {
       db.exec("COMMIT");
       return;
     }
     if (version !== 0) {
       throw new Error(
-        `Unsupported Mailarr schema version ${version}; create a fresh database`,
+        `Unsupported Mailarr schema version ${version}; delete mailarr.db and restart Mailarr to recreate it`,
       );
     }
 
@@ -137,6 +137,7 @@ export function initializeSchema(db: DatabaseSync): void {
       contact_email TEXT,
       score INTEGER NOT NULL DEFAULT 0,
       fit_notes TEXT,
+      draft_subject TEXT,
       draft_pitch TEXT,
       sent_pitch TEXT,
       drop_reason TEXT,
@@ -173,7 +174,7 @@ export function initializeSchema(db: DatabaseSync): void {
       WHERE dry_run = 0;
     `);
     seedInitialData(db);
-    db.exec("PRAGMA user_version = 1; COMMIT");
+    db.exec("PRAGMA user_version = 2; COMMIT");
   } catch (error) {
     if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
@@ -768,6 +769,14 @@ export function insertIntakeItem(
 export function getItem(db: DatabaseSync, id: number): Item {
   const row = db.prepare(`
     SELECT items.*,
+      (
+        SELECT sent_log.subject
+        FROM sent_log
+        WHERE sent_log.run_id = items.run_id
+          AND sent_log.normalized_company = items.normalized_company
+        ORDER BY sent_log.id DESC
+        LIMIT 1
+      ) AS sent_subject,
       EXISTS (
         SELECT 1
         FROM sent_log
@@ -817,6 +826,14 @@ export function listItems(
   );
   const rows = db.prepare(`
     SELECT items.*,
+      (
+        SELECT sent_log.subject
+        FROM sent_log
+        WHERE sent_log.run_id = items.run_id
+          AND sent_log.normalized_company = items.normalized_company
+        ORDER BY sent_log.id DESC
+        LIMIT 1
+      ) AS sent_subject,
       EXISTS (
         SELECT 1
         FROM sent_log
@@ -839,6 +856,7 @@ export function updateItem(
   input: {
     stage?: ItemStage;
     fitNotes?: string | null;
+    draftSubject?: string | null;
     draftPitch?: string | null;
     dropReason?: string | null;
     contactEmail?: string | null;
@@ -848,12 +866,13 @@ export function updateItem(
   const nextStage = input.stage ?? before.stage;
   const result = db.prepare(`
     UPDATE items
-    SET stage = ?, fit_notes = ?, draft_pitch = ?, drop_reason = ?,
+    SET stage = ?, fit_notes = ?, draft_subject = ?, draft_pitch = ?, drop_reason = ?,
         contact_email = ?, updated_at = ?
     WHERE id = ?
   `).run(
     nextStage,
     input.fitNotes === undefined ? before.fitNotes : input.fitNotes,
+    input.draftSubject === undefined ? before.draftSubject : input.draftSubject,
     input.draftPitch === undefined ? before.draftPitch : input.draftPitch,
     input.dropReason === undefined ? before.dropReason : input.dropReason,
     input.contactEmail === undefined ? before.contactEmail : input.contactEmail,
@@ -1111,7 +1130,9 @@ function itemFromRow(row: DbRow): Item {
     contactEmail: row.contact_email ? String(row.contact_email) : null,
     score: Number(row.score),
     fitNotes: row.fit_notes ? String(row.fit_notes) : null,
+    draftSubject: row.draft_subject ? String(row.draft_subject) : null,
     draftPitch: row.draft_pitch ? String(row.draft_pitch) : null,
+    sentSubject: row.sent_subject ? String(row.sent_subject) : null,
     sentPitch: row.sent_pitch ? String(row.sent_pitch) : null,
     contactedDryRun: Boolean(row.contacted_dry_run),
     dropReason: row.drop_reason ? String(row.drop_reason) : null,

@@ -23,7 +23,7 @@ export interface SendRequest {
   itemId: number;
   runId: number;
   to?: string;
-  subject: string;
+  subject?: string;
   draft: string;
   smtp: SmtpSettings;
   dryRun: boolean;
@@ -104,6 +104,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     const recipientAddress = input.to ?? item.contactEmail ?? "";
     const recipient = recipientAddress.trim().toLowerCase();
     const itemRecipient = item.contactEmail?.trim().toLowerCase();
+    const subject = input.subject ?? item.draftSubject ?? "";
 
     if (!itemRecipient || recipient !== itemRecipient) {
       throw new Error("Recipient must match the item's contact email");
@@ -117,13 +118,13 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
       requiredDisclosure: routine.requiredDisclosure,
     });
     const subjectValidation = validateSubject({
-      subject: input.subject,
+      subject,
       blockedTopics: routine.blockedTopics,
     });
     const errors = [...pitchValidation.errors, ...subjectValidation.errors];
 
     if (errors.length) throw new Error(errors.join("; "));
-    if (!input.subject.trim()) throw new Error("A subject is required");
+    if (!subject.trim()) throw new Error("A subject is required");
 
     const deliver = input.deliver ?? ((message) => deliverSmtp(message, input.smtp));
 
@@ -131,7 +132,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
       await deliver({
         from: input.smtp.fromAddress,
         to: recipientAddress,
-        subject: input.subject,
+        subject,
         text: body,
       });
     }
@@ -140,7 +141,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     recordSent(input.db, {
       company: item.company,
       email: recipientAddress,
-      subject: input.subject,
+      subject,
       body,
       sentAt,
       runId: input.runId,

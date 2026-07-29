@@ -55,10 +55,24 @@ export function registerMailarrRoutes(
     "/api/mailarr/routines/:id",
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
+        const routineId = positiveInt(req.params.id, "routine id");
+        const body = record(req.body);
+        const current = getRoutine(db, routineId);
+        const reviewedUpdatedAt = string(
+          body.reviewedUpdatedAt,
+          "reviewed updated time",
+        );
+
+        if (current.updatedAt !== reviewedUpdatedAt) {
+          throw new Error(
+            "routine changed after this form was loaded; reload current values and retry",
+          );
+        }
+
         const routine = updateRoutine(
           db,
-          positiveInt(req.params.id, "routine id"),
-          routineInput(req.body),
+          routineId,
+          routineInput(body),
         );
 
         ctx.broadcast({ type: "mailarr-changed" });
