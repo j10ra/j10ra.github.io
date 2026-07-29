@@ -43,6 +43,7 @@ export function openMailarrDatabase(dataDir: string): DatabaseSync {
   mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(join(dataDir, "mailarr.db"));
 
+  db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   initializeSchema(db);
@@ -51,19 +52,25 @@ export function openMailarrDatabase(dataDir: string): DatabaseSync {
 }
 
 export function initializeSchema(db: DatabaseSync): void {
-  const version = Number(
-    (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-  );
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const version = Number(
+      (db.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+    );
 
-  if (version === 1) return;
-  if (version !== 0) {
-    throw new Error(`Unsupported Mailarr schema version ${version}; create a fresh database`);
-  }
+    if (version === 1) {
+      db.exec("COMMIT");
+      return;
+    }
+    if (version !== 0) {
+      throw new Error(
+        `Unsupported Mailarr schema version ${version}; create a fresh database`,
+      );
+    }
 
-  db.exec(`
-    BEGIN IMMEDIATE;
-
-    CREATE TABLE routines (
+    db.exec(`
+      CREATE TABLE routines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       cron TEXT NOT NULL,
@@ -80,7 +87,7 @@ export function initializeSchema(db: DatabaseSync): void {
       CHECK (keywords IS NOT NULL OR score_floor IS NULL)
     );
 
-    CREATE TABLE sources (
+      CREATE TABLE sources (
       routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       url TEXT NOT NULL,
@@ -90,7 +97,7 @@ export function initializeSchema(db: DatabaseSync): void {
       PRIMARY KEY (routine_id, name)
     );
 
-    CREATE TABLE runs (
+      CREATE TABLE runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
       started_at TEXT,
@@ -105,7 +112,7 @@ export function initializeSchema(db: DatabaseSync): void {
       UNIQUE (routine_id, scheduled_for)
     );
 
-    CREATE TABLE items (
+      CREATE TABLE items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
       run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -128,7 +135,7 @@ export function initializeSchema(db: DatabaseSync): void {
       UNIQUE (routine_id, normalized_company, url)
     );
 
-    CREATE TABLE sent_log (
+      CREATE TABLE sent_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company TEXT NOT NULL,
       normalized_company TEXT NOT NULL,
@@ -140,26 +147,24 @@ export function initializeSchema(db: DatabaseSync): void {
       dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1))
     );
 
-    CREATE TABLE briefings (
+      CREATE TABLE briefings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
       markdown_body TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
 
-    CREATE INDEX runs_status_idx ON runs(status);
-    CREATE INDEX items_run_stage_idx ON items(run_id, stage);
-    CREATE INDEX sent_log_sent_at_idx ON sent_log(sent_at);
-    CREATE UNIQUE INDEX sent_log_real_company_idx
+      CREATE INDEX runs_status_idx ON runs(status);
+      CREATE INDEX items_run_stage_idx ON items(run_id, stage);
+      CREATE INDEX sent_log_sent_at_idx ON sent_log(sent_at);
+      CREATE UNIQUE INDEX sent_log_real_company_idx
       ON sent_log(normalized_company)
       WHERE dry_run = 0;
-  `);
-
-  try {
+    `);
     seedInitialData(db);
     db.exec("PRAGMA user_version = 1; COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
   }
 }

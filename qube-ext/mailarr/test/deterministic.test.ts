@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   addSource,
   createRoutine,
@@ -11,6 +13,7 @@ import {
   finishRun,
   getItem,
   getRoutine,
+  getRun,
   hasSentCompany,
   initializeSchema,
   listItems,
@@ -23,11 +26,16 @@ import {
   updateItem,
   updateSource,
 } from "../lib/db.js";
+import { filterContactEmail } from "../lib/contact.js";
 import { addItems } from "../lib/intake.js";
 import { scoreText } from "../lib/score.js";
-import { insertVerbatimTerms, sendFirstContact } from "../lib/send.js";
+import {
+  enforceSendGuards,
+  insertVerbatimTerms,
+  sendFirstContact,
+} from "../lib/send.js";
 import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js";
-import { dryRunEnabled } from "../mcp.js";
+import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
 
 const BASE_ROUTINE: RoutineInput = {
   name: "General outreach",
@@ -81,7 +89,43 @@ test("schema rejects legacy versions instead of running compatibility migrations
     () => initializeSchema(db),
     /Unsupported Mailarr schema version 4/,
   );
+  assert.equal(db.isTransaction, false);
   db.close();
+});
+
+test("schema initialization rechecks version under its transaction", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "mailarr-schema-test-"));
+  const path = join(dataDir, "mailarr.db");
+  const first = new DatabaseSync(path);
+  const second = new DatabaseSync(path);
+
+  try {
+    first.exec("PRAGMA busy_timeout = 5000");
+    second.exec("PRAGMA busy_timeout = 5000");
+    initializeSchema(first);
+    initializeSchema(second);
+
+    assert.equal(first.isTransaction, false);
+    assert.equal(second.isTransaction, false);
+    assert.equal(
+      (second.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+      1,
+    );
+  } finally {
+    first.close();
+    second.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("contact filter rejects blocked and malformed addresses", () => {
+  assert.equal(filterContactEmail("person@example.test"), "person@example.test");
+  assert.equal(filterContactEmail("noreply@example.test"), null);
+  assert.equal(filterContactEmail("privacy+case@example.test"), null);
+  assert.equal(filterContactEmail("missing-at.example.test"), null);
+  assert.equal(filterContactEmail("person@example"), null);
+  assert.equal(filterContactEmail("person @example.test"), null);
 });
 
 test("routine source CRUD is isolated by routine", () => {
@@ -212,22 +256,12 @@ test("required disclosure is routine-owned and exact", () => {
   assert.equal(present.valid, true);
 });
 
-test("numeric compensation claims are allowed only inside verbatim terms", () => {
+test("every digit is rejected outside verbatim terms", () => {
   const termsOnly = validatePitch({
     pitch: `${BASE_ROUTINE.requiredDisclosure}\nHello.\n${BASE_ROUTINE.verbatimTerms}`,
     verbatimTerms: BASE_ROUTINE.verbatimTerms,
     blockedTopics: [],
     requiredDisclosure: BASE_ROUTINE.requiredDisclosure,
-  });
-  const inventedBody = validatePitch({
-    pitch: `${BASE_ROUTINE.requiredDisclosure}\nThe rate is $80/hr.\n${BASE_ROUTINE.verbatimTerms}`,
-    verbatimTerms: BASE_ROUTINE.verbatimTerms,
-    blockedTopics: [],
-    requiredDisclosure: BASE_ROUTINE.requiredDisclosure,
-  });
-  const inventedSubject = validateSubject({
-    subject: "A $90/hr proposal",
-    blockedTopics: [],
   });
   const attributed = validateSubject({
     subject: "Your listed compensation",
@@ -235,9 +269,94 @@ test("numeric compensation claims are allowed only inside verbatim terms", () =>
   });
 
   assert.equal(termsOnly.valid, true);
-  assert.equal(inventedBody.valid, false);
-  assert.equal(inventedSubject.valid, false);
   assert.equal(attributed.valid, false);
+
+  for (const claim of [
+    "150 per hour",
+    "150/hr",
+    "150 an hour",
+    "150k a year",
+    "daily fee is 1200",
+  ]) {
+    const body = validatePitch({
+      pitch: `${BASE_ROUTINE.requiredDisclosure}\n${claim}\n${BASE_ROUTINE.verbatimTerms}`,
+      verbatimTerms: BASE_ROUTINE.verbatimTerms,
+      blockedTopics: [],
+      requiredDisclosure: BASE_ROUTINE.requiredDisclosure,
+    });
+    const subject = validateSubject({ subject: claim, blockedTopics: [] });
+
+    assert.equal(body.valid, false, `body accepted: ${claim}`);
+    assert.equal(subject.valid, false, `subject accepted: ${claim}`);
+    assert.match(body.errors.join(" "), /must not include digits/);
+  }
+});
+
+test("agent tool surface cannot mutate routine-owned guard data", async () => {
+  await withMailarrClient(async (client) => {
+    const tools = (await client.listTools()).tools;
+    const names = tools.map((tool) => tool.name);
+    const writableSchemas = tools
+      .filter((tool) => tool.name !== "routine_get")
+      .map((tool) => JSON.stringify(tool.inputSchema))
+      .join("\n");
+
+    assert.equal(names.includes("routine_update"), false);
+    for (const field of [
+      "verbatim_terms",
+      "blocked_topics",
+      "required_disclosure",
+      "daily_cap",
+      "keywords",
+      "score_floor",
+    ]) {
+      assert.doesNotMatch(writableSchemas, new RegExp(field));
+    }
+
+    const attemptedMutation = await client.callTool({
+      name: "routine_update",
+      arguments: {
+        routine_id: 1,
+        daily_cap: 999,
+        blocked_topics: [],
+        required_disclosure: null,
+        verbatim_terms: "Changed",
+      },
+    });
+
+    assert.equal(attemptedMutation.isError, true);
+    assert.match(JSON.stringify(attemptedMutation), /not found|unknown/iu);
+  });
+});
+
+test("an agent cannot disarm guards before sending", async () => {
+  await withDatabaseAsync(async (db) => {
+    const routine = createTestRoutine(db, {
+      blockedTopics: ["visa"],
+      requiredDisclosure: "Required disclosure.",
+    });
+    const run = startRun(db, createRun(db, routine.id).id);
+    const item = addQualifiedItem(db, routine.id, run.id, "Guarded Company", "guarded");
+    let deliveries = 0;
+
+    await assert.rejects(
+      sendFirstContact({
+        db,
+        itemId: item.id,
+        runId: run.id,
+        to: item.contactEmail ?? "",
+        subject: "Visa subject $400/hr",
+        draft: `A message at 150 per hour.\n${TERMS_TOKEN}`,
+        smtp: smtp(),
+        dryRun: false,
+        deliver: async () => {
+          deliveries += 1;
+        },
+      }),
+      /required disclosure|blocked topic|digits/,
+    );
+    assert.equal(deliveries, 0);
+  });
 });
 
 test("verbatim terms replace the token exactly once", () => {
@@ -373,6 +492,55 @@ test("send requires the recipient to match the stored contact", async () => {
   });
 });
 
+test("send guards require a qualified item and matching routine", () => {
+  withDatabase((db) => {
+    const firstRoutine = createTestRoutine(db, { name: "First guard routine" });
+    const secondRoutine = createTestRoutine(db, { name: "Second guard routine" });
+    const firstRun = startRun(db, createRun(db, firstRoutine.id).id);
+    const secondRun = startRun(db, createRun(db, secondRoutine.id).id);
+    const summary = addItems(db, firstRoutine.id, firstRun.id, [
+      intake(
+        "Guard Company",
+        "Contact",
+        "https://example.test/guard",
+        "General details",
+      ),
+    ]);
+    const item = listItems(db, {
+      routineId: firstRoutine.id,
+      runId: firstRun.id,
+      page: 1,
+      pageSize: 10,
+    }).items[0];
+
+    assert.equal(summary.inserted, 1);
+    assert.throws(
+      () => enforceSendGuards(db, { itemId: item.id, runId: firstRun.id }),
+      /Only qualified items/,
+    );
+    assert.throws(
+      () => enforceSendGuards(db, { itemId: item.id, runId: secondRun.id }),
+      /same routine/,
+    );
+  });
+});
+
+test("run_finish without a briefing records a failed run", () => {
+  withDatabase((db) => {
+    const routine = createTestRoutine(db);
+    const run = startRun(db, createRun(db, routine.id).id);
+
+    assert.throws(
+      () => finishRun(db, run.id, "done"),
+      /requires a briefing/,
+    );
+    const failed = getRun(db, run.id);
+
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.errorText, "Run finished without a briefing");
+  });
+});
+
 test("a source-maintenance run can finish successfully without sending", () => {
   withDatabase((db) => {
     const routine = createTestRoutine(db);
@@ -482,5 +650,26 @@ async function withDatabaseAsync(
   } finally {
     db.close();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
+async function withMailarrClient(
+  action: (client: Client) => Promise<void>,
+): Promise<void> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = mailarrMcpServer(() => {
+    throw new Error("test context is unavailable");
+  });
+  const client = new Client({ name: "mailarr-test", version: "1.0.0" });
+
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
+  try {
+    await action(client);
+  } finally {
+    await client.close();
+    await server.close();
   }
 }

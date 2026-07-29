@@ -14,7 +14,6 @@ import {
   saveBriefing,
   startRun,
   updateItem,
-  updateRoutine,
   updateSource,
 } from "./lib/db.js";
 import { addItems } from "./lib/intake.js";
@@ -53,18 +52,6 @@ export const MAILARR_INSTRUCTIONS = [
   "content validation, recipient matching, the daily cap, permanent company dedupe, and dry-run mode.",
 ].join("\n");
 
-const routineFields = {
-  name: z.string().min(1).optional(),
-  cron: z.string().min(1).optional(),
-  order_text: z.string().min(1).optional(),
-  daily_cap: z.number().int().positive().optional(),
-  verbatim_terms: z.string().min(1).optional(),
-  blocked_topics: z.array(z.string().min(1)).optional(),
-  required_disclosure: z.string().nullable().optional(),
-  keywords: z.record(z.number()).nullable().optional(),
-  score_floor: z.number().int().nullable().optional(),
-};
-
 export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
   const server = new McpServer(
     { name: "mailarr", version: "0.1.0" },
@@ -89,43 +76,6 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         ...getRoutine(db, routine_id),
         sources: listSources(db, routine_id),
       })),
-  );
-
-  server.registerTool(
-    "routine_update",
-    {
-      description:
-        "Update routine-owned instructions, guards, terms, cap, or optional scoring rules.",
-      inputSchema: {
-        routine_id: z.number().int().positive(),
-        ...routineFields,
-      },
-    },
-    ({ routine_id, ...patch }) =>
-      withDb(
-        ctx,
-        (db) => {
-          const current = getRoutine(db, routine_id);
-
-          return updateRoutine(db, routine_id, {
-            name: patch.name ?? current.name,
-            cron: patch.cron ?? current.cron,
-            orderText: patch.order_text ?? current.orderText,
-            dailyCap: patch.daily_cap ?? current.dailyCap,
-            verbatimTerms: patch.verbatim_terms ?? current.verbatimTerms,
-            blockedTopics: patch.blocked_topics ?? current.blockedTopics,
-            requiredDisclosure:
-              patch.required_disclosure === undefined
-                ? current.requiredDisclosure
-                : patch.required_disclosure,
-            keywords:
-              patch.keywords === undefined ? current.keywords : patch.keywords,
-            scoreFloor:
-              patch.score_floor === undefined ? current.scoreFloor : patch.score_floor,
-          });
-        },
-        true,
-      ),
   );
 
   server.registerTool(

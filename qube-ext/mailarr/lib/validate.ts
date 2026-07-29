@@ -2,8 +2,7 @@ export const TERMS_TOKEN = "{{TERMS}}";
 
 const ATTRIBUTED_VALUE =
   /\b(posted|advertised|listed|stated|published)\s+(salary|rate|range|compensation|pay|fee|wage)\b/iu;
-const NUMERIC_VALUE =
-  /(?:[$€£]\s?\d[\d,.]*(?:\s?[kKmM])?(?:\s*(?:-|–|to)\s*[$€£]?\s?\d[\d,.]*(?:\s?[kKmM])?)?(?:\s*(?:\/|per)\s*(?:hour|hr|year|annum|week|day))?)|(?:\b\d[\d,.]*\s?(?:USD|NZD|AUD|CAD|EUR|GBP)(?:\s*(?:\/|per)\s*(?:hour|hr|year|annum|week|day))?\b)|(?:\b\d[\d,.]*\s*(?:salary|rate|compensation|pay|fee|wage)\b)/giu;
+const DIGIT = /\d/u;
 
 export interface MessageValidation {
   valid: boolean;
@@ -57,10 +56,8 @@ function guardedContentErrors(
     errors.push(`${label} must not characterize a numeric value as externally stated`);
   }
 
-  const numericClaims = [...value.matchAll(NUMERIC_VALUE)].map((match) => match[0]);
-
-  if (numericClaims.length) {
-    errors.push(`${label} must not include numeric compensation claims: ${numericClaims.join(", ")}`);
+  if (DIGIT.test(value)) {
+    errors.push(`${label} must not include digits outside the verbatim terms block`);
   }
 
   return errors;
