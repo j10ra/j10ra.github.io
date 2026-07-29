@@ -144,6 +144,11 @@ const EMPTY_FORM: RoutineForm = {
 };
 const INPUT_CLASS =
   "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50";
+const ITEM_GRID: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "28px 1.1fr 1.4fr 0.8fr 0.7fr 70px 120px",
+  minWidth: 820,
+};
 const STAGES: Array<"all" | Stage> = [
   "all",
   "discovered",
@@ -1217,7 +1222,71 @@ function RoutineWorkbench({
         </div>
       </div>
 
-      <div className="order-3 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
+      <div className="flex gap-1 overflow-x-auto">
+        {STAGES.map((entry) => (
+          <button
+            key={entry}
+            className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-3 py-1 text-xs ${
+              stage === entry
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border text-muted-foreground hover:text-foreground"
+            }`}
+            type="button"
+            onClick={() => rememberStage(entry)}
+          >
+            <span>{entry}</span>
+            <span className={stage === entry ? "opacity-80" : "opacity-60"}>
+              {pipeline.counts[entry]}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className="overflow-x-auto rounded-md border border-border bg-background">
+        <div style={ITEM_GRID} className="gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
+          <span />
+          <span>Company</span>
+          <span>Role</span>
+          <span>Rate</span>
+          <span>Stage</span>
+          <span>Email</span>
+          <span>Source</span>
+        </div>
+        {pipeline.items.map((item) => (
+          <div key={item.id} className="border-t border-border">
+            <button
+              style={ITEM_GRID}
+              className="w-full gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
+              type="button"
+              onClick={() =>
+                rememberExpanded(expanded === item.id ? null : item.id)
+              }
+            >
+              {expanded === item.id ? (
+                <ChevronDown size={16} className="text-muted-foreground" />
+              ) : (
+                <ChevronRight size={16} className="text-muted-foreground" />
+              )}
+              <span className="truncate font-medium">{item.company}</span>
+              <span className="truncate">{item.role}</span>
+              <span className="truncate text-muted-foreground">
+                {item.rateInfo || "Not listed"}
+              </span>
+              <span className="text-muted-foreground">{item.stage}</span>
+              <EmailStateBadge item={item} />
+              <span className="truncate text-muted-foreground">{item.source}</span>
+            </button>
+            {expanded === item.id && <PipelineItemDetail item={item} />}
+          </div>
+        ))}
+        {pipeline.items.length === 0 && (
+          <p className="border-t border-border p-6 text-center text-sm text-muted-foreground">
+            No items in this stage.
+          </p>
+        )}
+      </div>
+
+      <div className="grid gap-4">
         <BriefingSection
           briefing={pipeline.briefing}
           expanded={briefingExpanded}
@@ -1290,69 +1359,6 @@ function RoutineWorkbench({
             )}
           </section>
         </div>
-      </div>
-
-      <div className="order-1 flex gap-1 overflow-x-auto">
-        {STAGES.map((entry) => (
-          <button
-            key={entry}
-            className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-3 py-1 text-xs ${
-              stage === entry
-                ? "border-primary bg-primary text-primary-foreground"
-                : "border-border text-muted-foreground hover:text-foreground"
-            }`}
-            type="button"
-            onClick={() => rememberStage(entry)}
-          >
-            <span>{entry}</span>
-            <span className={stage === entry ? "opacity-80" : "opacity-60"}>
-              {pipeline.counts[entry]}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      <div className="order-2 min-w-[820px] overflow-hidden rounded-md border border-border bg-background">
-        <div className="grid grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_70px_120px] gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
-          <span />
-          <span>Company</span>
-          <span>Role</span>
-          <span>Rate</span>
-          <span>Stage</span>
-          <span>Email</span>
-          <span>Source</span>
-        </div>
-        {pipeline.items.map((item) => (
-          <div key={item.id} className="border-t border-border">
-            <button
-              className="grid w-full grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_70px_120px] gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
-              type="button"
-              onClick={() =>
-                rememberExpanded(expanded === item.id ? null : item.id)
-              }
-            >
-              {expanded === item.id ? (
-                <ChevronDown size={16} className="text-muted-foreground" />
-              ) : (
-                <ChevronRight size={16} className="text-muted-foreground" />
-              )}
-              <span className="truncate font-medium">{item.company}</span>
-              <span className="truncate">{item.role}</span>
-              <span className="truncate text-muted-foreground">
-                {item.rateInfo || "Not listed"}
-              </span>
-              <span className="text-muted-foreground">{item.stage}</span>
-              <EmailStateBadge item={item} />
-              <span className="truncate text-muted-foreground">{item.source}</span>
-            </button>
-            {expanded === item.id && <PipelineItemDetail item={item} />}
-          </div>
-        ))}
-        {pipeline.items.length === 0 && (
-          <p className="border-t border-border p-6 text-center text-sm text-muted-foreground">
-            No items in this stage.
-          </p>
-        )}
       </div>
     </div>
   );
