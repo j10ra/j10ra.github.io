@@ -1,13 +1,14 @@
 {
   "id": "mailarr",
   "name": "Mailarr",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "sdkVersion": "^0.8.0",
   "server": "dist/server.js",
   "web": "dist/web.js",
   "capabilities": [
     "storage",
     "secrets",
-    "smtp"
+    "smtp",
+    "agent-notify"
   ]
 }

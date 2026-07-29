@@ -1,43 +1,91 @@
-import type { ExtensionContext } from "@qube-code/extension-sdk";
+import type {
+  ExtensionContext,
+  NotifyAgentRefusal,
+} from "@qube-code/extension-sdk";
 import { createRun, listEnabledRoutines, openMailarrDatabase } from "./db.js";
 import { cronMatches, localMinuteKey } from "./cron.js";
+import type { Routine, Run } from "./model.js";
 
 const timers = new Map<string, NodeJS.Timeout>();
 
-export const SCHEDULER_DELIVERY = "polling fallback" as const;
+export type RunDeliveryOutcome =
+  | { delivery: "nudged" | "queued" }
+  | { delivery: "polling fallback"; refusal?: NotifyAgentRefusal };
+
+export async function notifyPendingRun(
+  ctx: ExtensionContext,
+  routine: Pick<Routine, "id" | "name" | "worktreeId">,
+  run: Pick<Run, "id">,
+): Promise<RunDeliveryOutcome> {
+  if (routine.worktreeId === null) return { delivery: "polling fallback" };
+
+  try {
+    const result = await ctx.notifyAgent({
+      worktreeId: routine.worktreeId,
+      text: `[mailarr] Routine ${routine.name} (id ${routine.id}) has pending run ${run.id}. Execute the Mailarr run protocol from the sebe skill.`,
+      nudgeId: `mailarr-run-${run.id}`,
+    });
+
+    if (result.ok) {
+      return { delivery: result.queued ? "queued" : "nudged" };
+    }
+
+    console.error(
+      `[mailarr] nudge refused for run ${run.id}: ${result.refused}; agent will poll`,
+    );
+
+    return { delivery: "polling fallback", refusal: result.refused };
+  } catch (error) {
+    console.error(
+      `[mailarr] nudge failed for run ${run.id}: ${message(error)}; agent will poll`,
+    );
+
+    return { delivery: "polling fallback", refusal: "delivery-failed" };
+  }
+}
 
 export function startScheduler(ctx: ExtensionContext): void {
   stopScheduler(ctx);
 
   const tick = () => {
-    const db = openMailarrDatabase(ctx.dataDir);
-    const now = new Date();
-    const scheduledFor = localMinuteKey(now);
-
-    try {
-      let changed = false;
-
-      for (const routine of listEnabledRoutines(db)) {
-        try {
-          if (!cronMatches(routine.cron, now)) continue;
-
-          createRun(db, routine.id, scheduledFor);
-          changed = true;
-        } catch (error) {
-          console.error(`[mailarr] scheduler skipped ${routine.name}: ${message(error)}`);
-        }
-      }
-
-      if (changed) ctx.broadcast({ type: "mailarr-changed" });
-    } finally {
-      db.close();
-    }
+    void runSchedulerTick(ctx).catch((error) => {
+      console.error(`[mailarr] scheduler tick failed: ${message(error)}`);
+    });
   };
 
   tick();
   const timer = setInterval(tick, 60_000);
   timer.unref();
   timers.set(ctx.dataDir, timer);
+}
+
+export async function runSchedulerTick(
+  ctx: ExtensionContext,
+  now = new Date(),
+): Promise<void> {
+  const db = openMailarrDatabase(ctx.dataDir);
+  const scheduledFor = localMinuteKey(now);
+
+  try {
+    let changed = false;
+
+    for (const routine of listEnabledRoutines(db)) {
+      try {
+        if (!cronMatches(routine.cron, now)) continue;
+
+        const run = createRun(db, routine.id, scheduledFor);
+
+        changed = true;
+        await notifyPendingRun(ctx, routine, run);
+      } catch (error) {
+        console.error(`[mailarr] scheduler skipped ${routine.name}: ${message(error)}`);
+      }
+    }
+
+    if (changed) ctx.broadcast({ type: "mailarr-changed" });
+  } finally {
+    db.close();
+  }
 }
 
 export function stopScheduler(ctx?: ExtensionContext): void {

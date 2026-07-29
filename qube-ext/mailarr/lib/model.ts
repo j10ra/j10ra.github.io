@@ -18,6 +18,7 @@ export interface Routine {
   orderText: string;
   session: string | null;
   sessionLabel: string | null;
+  worktreeId: number | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];
