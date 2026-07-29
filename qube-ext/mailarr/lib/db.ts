@@ -19,6 +19,7 @@ interface SeedData {
     orderText: string;
     session: string | null;
     sessionLabel: string | null;
+    worktreeId: number | null;
     dailyCap: number;
     verbatimTerms: string;
     blockedTopics: string[];
@@ -66,7 +67,7 @@ export function initializeSchema(db: DatabaseSync): void {
         .user_version,
     );
 
-    if (version === 2) {
+    if (version === 3) {
       db.exec("COMMIT");
       return;
     }
@@ -84,6 +85,7 @@ export function initializeSchema(db: DatabaseSync): void {
       order_text TEXT NOT NULL,
       session TEXT,
       session_label TEXT,
+      worktree_id INTEGER,
       daily_cap INTEGER NOT NULL CHECK (daily_cap > 0),
       verbatim_terms TEXT NOT NULL,
       blocked_topics TEXT NOT NULL DEFAULT '[]',
@@ -175,7 +177,7 @@ export function initializeSchema(db: DatabaseSync): void {
       WHERE dry_run = 0;
     `);
     seedInitialData(db);
-    db.exec("PRAGMA user_version = 2; COMMIT");
+    db.exec("PRAGMA user_version = 3; COMMIT");
   } catch (error) {
     if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
@@ -188,17 +190,18 @@ function seedInitialData(db: DatabaseSync): void {
 
   db.prepare(`
     INSERT INTO routines (
-      name, cron, order_text, session, session_label, daily_cap,
+      name, cron, order_text, session, session_label, worktree_id, daily_cap,
       verbatim_terms, blocked_topics,
       required_disclosure, keywords, score_floor, enabled, frozen, frozen_at,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     routine.name,
     routine.cron,
     routine.orderText,
     routine.session,
     routine.sessionLabel,
+    routine.worktreeId,
     routine.dailyCap,
     routine.verbatimTerms,
     JSON.stringify(routine.blockedTopics),
@@ -229,6 +232,7 @@ export interface RoutineInput {
   orderText: string;
   session: string | null;
   sessionLabel: string | null;
+  worktreeId: number | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];
@@ -250,10 +254,10 @@ export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
   const at = nowIso();
   const result = db.prepare(`
     INSERT INTO routines (
-      name, cron, order_text, session, session_label, daily_cap,
+      name, cron, order_text, session, session_label, worktree_id, daily_cap,
       verbatim_terms, blocked_topics,
       required_disclosure, keywords, score_floor, enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `).run(...routineValues(input), at, at);
 
   return getRoutine(db, Number(result.lastInsertRowid));
@@ -268,7 +272,7 @@ export function updateRoutine(
   const result = db.prepare(`
     UPDATE routines
     SET name = ?, cron = ?, order_text = ?, session = ?, session_label = ?,
-        daily_cap = ?, verbatim_terms = ?, blocked_topics = ?,
+        worktree_id = ?, daily_cap = ?, verbatim_terms = ?, blocked_topics = ?,
         required_disclosure = ?, keywords = ?, score_floor = ?, updated_at = ?
     WHERE id = ?
   `).run(
@@ -304,6 +308,7 @@ export function updateRoutineContent(
     orderText: input.orderText ?? current.orderText,
     session: current.session,
     sessionLabel: current.sessionLabel,
+    worktreeId: current.worktreeId,
     dailyCap: current.dailyCap,
     verbatimTerms: input.verbatimTerms ?? current.verbatimTerms,
     blockedTopics: input.blockedTopics ?? current.blockedTopics,
@@ -325,6 +330,7 @@ function routineValues(input: RoutineInput): Array<string | number | null> {
     input.orderText.trim(),
     trimmedOrNull(input.session),
     trimmedOrNull(input.sessionLabel),
+    input.worktreeId,
     input.dailyCap,
     input.verbatimTerms,
     JSON.stringify(uniqueTerms(input.blockedTopics)),
@@ -340,6 +346,12 @@ function validateRoutineInput(input: RoutineInput): void {
   if (!input.orderText.trim()) throw new Error("routine order is required");
   if (!Number.isInteger(input.dailyCap) || input.dailyCap <= 0) {
     throw new Error("routine daily cap must be a positive integer");
+  }
+  if (
+    input.worktreeId !== null &&
+    (!Number.isInteger(input.worktreeId) || input.worktreeId <= 0)
+  ) {
+    throw new Error("routine worktree id must be a positive integer or null");
   }
   if (!input.verbatimTerms.trim()) throw new Error("routine verbatim terms are required");
   if (
@@ -1103,6 +1115,7 @@ function routineFromRow(row: DbRow): Routine {
     orderText: String(row.order_text),
     session: row.session ? String(row.session) : null,
     sessionLabel: row.session_label ? String(row.session_label) : null,
+    worktreeId: row.worktree_id === null ? null : Number(row.worktree_id),
     dailyCap: Number(row.daily_cap),
     verbatimTerms: String(row.verbatim_terms),
     blockedTopics: parseStringArray(row.blocked_topics, "blocked topics"),

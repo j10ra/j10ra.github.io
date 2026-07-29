@@ -33,6 +33,7 @@ interface Routine {
   orderText: string;
   session: string | null;
   sessionLabel: string | null;
+  worktreeId: number | null;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string[];
@@ -95,6 +96,7 @@ interface RoutineForm {
   orderText: string;
   session: string;
   sessionLabel: string;
+  worktreeId: string;
   dailyCap: number;
   verbatimTerms: string;
   blockedTopics: string;
@@ -104,6 +106,11 @@ interface RoutineForm {
 }
 
 type WorkbenchTarget = number | "new";
+type RunDeliveryResponse = {
+  run: Run;
+  delivery: "nudged" | "queued" | "polling fallback";
+  refusal?: string;
+};
 
 interface StoredFormDraft {
   value: RoutineForm;
@@ -137,6 +144,7 @@ const EMPTY_FORM: RoutineForm = {
   orderText: "",
   session: "",
   sessionLabel: "",
+  worktreeId: "",
   dailyCap: 5,
   verbatimTerms: "",
   blockedTopics: "",
@@ -502,6 +510,9 @@ function RoutineRows({
                 <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
                   agent: {routine.sessionLabel ?? (routine.session ? "unlabelled" : "unbound")}
                 </span>
+                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                  nudge: {routine.worktreeId ?? "polling only"}
+                </span>
               </span>
               <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                 {routine.cron}
@@ -553,6 +564,7 @@ function RoutineEditor({
             orderText: routine.orderText,
             session: routine.session ?? "",
             sessionLabel: routine.sessionLabel ?? "",
+            worktreeId: routine.worktreeId?.toString() ?? "",
             dailyCap: routine.dailyCap,
             verbatimTerms: routine.verbatimTerms,
             blockedTopics: routine.blockedTopics.join("\n"),
@@ -616,6 +628,9 @@ function RoutineEditor({
         orderText: value.orderText,
         session: value.session.trim() || null,
         sessionLabel: value.sessionLabel.trim() || null,
+        worktreeId: value.worktreeId.trim()
+          ? Number(value.worktreeId)
+          : null,
         dailyCap: value.dailyCap,
         verbatimTerms: value.verbatimTerms,
         blockedTopics: value.blockedTopics
@@ -705,6 +720,20 @@ function RoutineEditor({
             value={value.sessionLabel}
             onChange={(event) =>
               setValue({ ...value, sessionLabel: event.target.value })
+            }
+          />
+        </Field>
+        <Field
+          label="Nudge worktree"
+          helper="the qube worktree id whose single agent session executes this routine; leave empty for polling only"
+        >
+          <input
+            className={INPUT_CLASS}
+            type="number"
+            min={1}
+            value={value.worktreeId}
+            onChange={(event) =>
+              setValue({ ...value, worktreeId: event.target.value })
             }
           />
         </Field>
@@ -908,6 +937,9 @@ function RoutineWorkbench({
     restored.expandedItemId,
   );
   const [error, setError] = useState<string | null>(null);
+  const [runDelivery, setRunDelivery] = useState<RunDeliveryResponse | null>(
+    null,
+  );
   const [reviewingFreeze, setReviewingFreeze] = useState(
     restored.reviewingFreeze,
   );
@@ -985,6 +1017,27 @@ function RoutineWorkbench({
       );
       rememberReviewingFreeze(true);
       setError(null);
+    } catch (nextError) {
+      setError(message(nextError));
+    }
+  };
+
+  const runNow = async () => {
+    if (!pipeline) return;
+
+    try {
+      const result = await request<RunDeliveryResponse>(
+        `/api/mailarr/routines/${pipeline.routine.id}/run`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      );
+
+      setRunDelivery(result);
+      setError(null);
+      await load();
     } catch (nextError) {
       setError(message(nextError));
     }
@@ -1163,18 +1216,16 @@ function RoutineWorkbench({
                 ? "A run is already pending for this routine"
                 : "Run now"
             }
-            onClick={() =>
-              void mutate(
-                `/api/mailarr/routines/${pipeline.routine.id}/run`,
-                {},
-                load,
-                setError,
-              )
-            }
+            onClick={() => void runNow()}
           >
             <Play size={15} />
             Run now
           </button>
+          {runDelivery && (
+            <span className="text-xs text-muted-foreground">
+              {runDeliveryMessage(runDelivery)}
+            </span>
+          )}
           {pipeline.routine.pendingRun && (
             <>
               <span className="text-xs text-muted-foreground">
@@ -1325,6 +1376,9 @@ function RoutineWorkbench({
                 Any available agent may run this routine.
               </p>
             )}
+            <p className="mt-3 text-xs text-muted-foreground">
+              Nudge worktree: {pipeline.routine.worktreeId ?? "polling only"}
+            </p>
           </section>
 
           <section className="rounded-md border border-border bg-background p-4">
@@ -2003,6 +2057,14 @@ async function mutate(
   } catch (error) {
     setError(message(error));
   }
+}
+
+function runDeliveryMessage(result: RunDeliveryResponse): string {
+  if (result.delivery === "nudged") return "agent nudged";
+  if (result.delivery === "queued") return "queued for delivery";
+  if (!result.refusal) return "polling only; no nudge worktree configured";
+
+  return `nudge refused: ${result.refusal}, agent will poll`;
 }
 
 interface EditorTabsApi {

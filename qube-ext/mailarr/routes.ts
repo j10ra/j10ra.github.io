@@ -26,6 +26,7 @@ import {
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
+import { notifyPendingRun } from "./lib/scheduler.js";
 import { requireFrozenRoutine, sendFirstContact } from "./lib/send.js";
 import { dryRunEnabled } from "./mcp.js";
 
@@ -141,12 +142,15 @@ export function registerMailarrRoutes(
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
         const routineId = positiveInt(req.params.id, "routine id");
-        getRoutine(db, routineId);
+        const routine = getRoutine(db, routineId);
         const run = createRun(db, routineId);
 
         ctx.broadcast({ type: "mailarr-changed" });
 
-        return { run, delivery: "polling fallback" };
+        return notifyPendingRun(ctx, routine, run).then((outcome) => ({
+          run,
+          ...outcome,
+        }));
       }),
   );
 
@@ -326,6 +330,7 @@ function routineInput(value: unknown): RoutineInput {
     orderText: string(body.orderText, "order"),
     session: nullableString(body.session),
     sessionLabel: nullableString(body.sessionLabel),
+    worktreeId: nullablePositiveInteger(body.worktreeId, "nudge worktree"),
     dailyCap: positiveInt(body.dailyCap, "daily cap"),
     verbatimTerms: string(body.verbatimTerms, "verbatim terms", false),
     blockedTopics: stringArray(body.blockedTopics, "blocked topics"),
@@ -368,6 +373,16 @@ function nullableInteger(value: unknown, field: string): number | null {
   const parsed = Number(value);
 
   if (!Number.isInteger(parsed)) throw new Error(`${field} must be an integer or null`);
+
+  return parsed;
+}
+
+function nullablePositiveInteger(value: unknown, field: string): number | null {
+  const parsed = nullableInteger(value, field);
+
+  if (parsed !== null && parsed <= 0) {
+    throw new Error(`${field} must be a positive integer or null`);
+  }
 
   return parsed;
 }

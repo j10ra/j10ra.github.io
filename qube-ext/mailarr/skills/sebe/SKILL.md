@@ -19,6 +19,8 @@ Sebe is a genderless AI assistant.
 
 When nudged, or while polling for work:
 
+Nudges beginning `[mailarr]` arrive via the qube inbox. Run this protocol immediately when one arrives instead of waiting for the polling wake.
+
 1. Call `routines_due`, then act only on runs whose `session` matches your own `QUBE_SESSION_ID` or is null.
 2. Call `routine_get` for each pending run and follow its `order_text`.
 3. Call `run_start`.

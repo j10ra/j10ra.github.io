@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -63,6 +63,7 @@ const BASE_ROUTINE: RoutineInput = {
   orderText: "Follow the routine instructions.",
   session: null,
   sessionLabel: null,
+  worktreeId: null,
   dailyCap: 5,
   verbatimTerms: "Availability: 20 hours per week at $120/hr.",
   blockedTopics: ["restricted topic", "private-data"],
@@ -71,7 +72,7 @@ const BASE_ROUTINE: RoutineInput = {
   scoreFloor: null,
 };
 
-test("fresh schema is version 2 and seeds disabled routine data with permanent history", () => {
+test("fresh schema is version 3 and seeds disabled routine data with permanent history", () => {
   withDatabase((db) => {
     const version = db.prepare("PRAGMA user_version").get() as {
       user_version: number;
@@ -86,7 +87,7 @@ test("fresh schema is version 2 and seeds disabled routine data with permanent h
       .prepare("SELECT company, dry_run FROM sent_log ORDER BY company")
       .all() as Array<{ company: string; dry_run: number }>;
 
-    assert.equal(version.user_version, 2);
+    assert.equal(version.user_version, 3);
     const itemColumns = db.prepare("PRAGMA table_info(items)").all() as Array<{
       name: string;
     }>;
@@ -98,6 +99,7 @@ test("fresh schema is version 2 and seeds disabled routine data with permanent h
     assert.equal(routines[0].frozen_at, null);
     assert.equal(routines[0].session, null);
     assert.equal(routines[0].session_label, null);
+    assert.equal(routines[0].worktree_id, null);
     assert.equal(routines[0].keywords, null);
     assert.equal(routines[0].score_floor, null);
     assert.equal(sourceCount.count, 0);
@@ -112,6 +114,15 @@ test("fresh schema is version 2 and seeds disabled routine data with permanent h
   });
 });
 
+test("manifest declares agent notification capability", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../extension.json", import.meta.url), "utf8"),
+  ) as { version: string; capabilities: string[] };
+
+  assert.equal(manifest.version, "0.8.0");
+  assert.ok(manifest.capabilities.includes("agent-notify"));
+});
+
 test("panel routes persist routine session bindings through create and update", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const createdResponse = (await routes.call(
@@ -122,11 +133,13 @@ test("panel routes persist routine session bindings through create and update", 
         name: "Bound routine",
         session: "qube_cc_j10ra-github-io_2",
         sessionLabel: "claude · sonnet",
+        worktreeId: 73088147,
       },
     )) as RoutineResponse;
 
     assert.equal(createdResponse.routine.session, "qube_cc_j10ra-github-io_2");
     assert.equal(createdResponse.routine.sessionLabel, "claude · sonnet");
+    assert.equal(createdResponse.routine.worktreeId, 73088147);
 
     const updatedResponse = (await routes.call(
       "PUT",
@@ -136,6 +149,7 @@ test("panel routes persist routine session bindings through create and update", 
         name: "Bound routine",
         session: "qube_cx_j10ra-github-io_3",
         sessionLabel: "codex · gpt-5.6-sol",
+        worktreeId: 73088148,
         reviewedUpdatedAt: createdResponse.routine.updatedAt,
       },
       { id: String(createdResponse.routine.id) },
@@ -143,6 +157,7 @@ test("panel routes persist routine session bindings through create and update", 
 
     assert.equal(updatedResponse.routine.session, "qube_cx_j10ra-github-io_3");
     assert.equal(updatedResponse.routine.sessionLabel, "codex · gpt-5.6-sol");
+    assert.equal(updatedResponse.routine.worktreeId, 73088148);
 
     const db = openMailarrDatabase(dataDir);
     try {
@@ -150,10 +165,97 @@ test("panel routes persist routine session bindings through create and update", 
 
       assert.equal(persisted.session, "qube_cx_j10ra-github-io_3");
       assert.equal(persisted.sessionLabel, "codex · gpt-5.6-sol");
+      assert.equal(persisted.worktreeId, 73088148);
     } finally {
       db.close();
     }
   });
+});
+
+test("run now returns agent nudge delivery outcomes without losing runs", async () => {
+  let behavior: "nudged" | "queued" | "refused" | "throws" = "nudged";
+  const notifications: Array<{
+    worktreeId: number;
+    text: string;
+    nudgeId?: string;
+  }> = [];
+
+  await withPanelRoutes(
+    async (routes) => {
+      const created = (await routes.call("POST", "/api/mailarr/routines", {
+        ...BASE_ROUTINE,
+        name: "Push routine",
+        worktreeId: 73088147,
+      })) as RoutineResponse;
+      const params = { id: String(created.routine.id) };
+
+      const nudged = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/run",
+        {},
+        params,
+      )) as RunDeliveryRouteResponse;
+
+      assert.equal(nudged.delivery, "nudged");
+
+      behavior = "queued";
+      const queued = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/run",
+        {},
+        params,
+      )) as RunDeliveryRouteResponse;
+
+      assert.equal(queued.delivery, "queued");
+
+      behavior = "refused";
+      const refused = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/run",
+        {},
+        params,
+      )) as RunDeliveryRouteResponse;
+
+      assert.deepEqual(
+        { delivery: refused.delivery, refusal: refused.refusal },
+        { delivery: "polling fallback", refusal: "rate-limited" },
+      );
+
+      behavior = "throws";
+      const failed = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/run",
+        {},
+        params,
+      )) as RunDeliveryRouteResponse;
+
+      assert.deepEqual(
+        { delivery: failed.delivery, refusal: failed.refusal },
+        { delivery: "polling fallback", refusal: "delivery-failed" },
+      );
+      assert.deepEqual(
+        notifications.map(({ worktreeId, nudgeId }) => ({ worktreeId, nudgeId })),
+        [
+          { worktreeId: 73088147, nudgeId: `mailarr-run-${nudged.run.id}` },
+          { worktreeId: 73088147, nudgeId: `mailarr-run-${queued.run.id}` },
+          { worktreeId: 73088147, nudgeId: `mailarr-run-${refused.run.id}` },
+          { worktreeId: 73088147, nudgeId: `mailarr-run-${failed.run.id}` },
+        ],
+      );
+    },
+    {
+      notifyAgent: async (input) => {
+        notifications.push(input);
+
+        if (behavior === "throws") throw new Error("delivery transport unavailable");
+        if (behavior === "refused") {
+          return { ok: false, refused: "rate-limited" };
+        }
+
+        return { ok: true, queued: behavior === "queued" };
+      },
+    },
+  );
 });
 
 test("routine edit rejects stale forms and accepts a reload retry", async () => {
@@ -291,7 +393,7 @@ test("schema initialization rechecks version under its transaction", () => {
     assert.equal(
       (second.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      2,
+      3,
     );
   } finally {
     first.close();
@@ -825,6 +927,7 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         "daily_cap",
         "session",
         "session_label",
+        "worktree_id",
         "enabled",
         "frozen",
         "frozen_at",
@@ -2050,11 +2153,18 @@ interface RoutineResponse {
     id: number;
     session: string | null;
     sessionLabel: string | null;
+    worktreeId: number | null;
     frozen: boolean;
     frozenAt: string | null;
     editedSinceFreeze: boolean;
     updatedAt: string;
   };
+}
+
+interface RunDeliveryRouteResponse {
+  run: { id: number };
+  delivery: "nudged" | "queued" | "polling fallback";
+  refusal?: string;
 }
 
 type PanelMethod = "GET" | "POST" | "PUT";
@@ -2085,6 +2195,7 @@ async function withPanelRoutes(
     },
     dataDir: string,
   ) => Promise<void>,
+  ctxOverrides: Partial<ExtensionContext> = {},
 ): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "mailarr-routes-test-"));
   const handlers = new Map<string, PanelHandler>();
@@ -2110,6 +2221,8 @@ async function withPanelRoutes(
         key === "smtp_user" ? "user" : key === "smtp_password" ? "secret" : null,
     },
     broadcast: () => undefined,
+    notifyAgent: async () => ({ ok: true, queued: false }),
+    ...ctxOverrides,
   } as unknown as ExtensionContext;
 
   registerMailarrRoutes(app, () => ctx);
