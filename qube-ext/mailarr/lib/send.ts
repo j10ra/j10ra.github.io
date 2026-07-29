@@ -8,16 +8,11 @@ import {
   recordSent,
   sentTodayCount,
 } from "./db.js";
-import { COMMERCIAL_TERMS_TOKEN, validatePitch, validateSubject } from "./validate.js";
-
-export interface CommercialSettings {
-  hourlyFloor: string;
-  targetRate: string;
-  premiumBand: string;
-  weeklyHours: string;
-}
+import { TERMS_TOKEN, validatePitch, validateSubject } from "./validate.js";
 
 export interface SmtpSettings {
+  host: string;
+  port: number;
   user: string;
   password: string;
   fromAddress: string;
@@ -30,11 +25,15 @@ export interface SendRequest {
   to: string;
   subject: string;
   draft: string;
-  commercial: CommercialSettings;
   smtp: SmtpSettings;
   dryRun: boolean;
   now?: Date;
-  deliver?: (message: { from: string; to: string; subject: string; text: string }) => Promise<void>;
+  deliver?: (message: {
+    from: string;
+    to: string;
+    subject: string;
+    text: string;
+  }) => Promise<void>;
 }
 
 export interface SendResult {
@@ -45,35 +44,15 @@ export interface SendResult {
 
 let sendQueue = Promise.resolve();
 
-export function formatCommercialTerms(settings: CommercialSettings): string {
-  const values = [
-    settings.hourlyFloor,
-    settings.targetRate,
-    settings.premiumBand,
-    settings.weeklyHours,
-  ];
-
-  if (values.some((value) => !value.trim())) {
-    throw new Error("All commercial term settings must be configured before sending");
-  }
-
-  return [
-    "Commercial terms provided by Jetz:",
-    `Hourly floor: ${settings.hourlyFloor.trim()}`,
-    `Target rate: ${settings.targetRate.trim()}`,
-    `Premium band: ${settings.premiumBand.trim()}`,
-    `Weekly hours: ${settings.weeklyHours.trim()}`,
-  ].join("\n");
-}
-
-export function insertCommercialTerms(draft: string, terms: string): string {
-  const occurrences = draft.split(COMMERCIAL_TERMS_TOKEN).length - 1;
+export function insertVerbatimTerms(draft: string, terms: string): string {
+  const occurrences = draft.split(TERMS_TOKEN).length - 1;
 
   if (occurrences !== 1) {
-    throw new Error(`Pitch must include ${COMMERCIAL_TERMS_TOKEN} exactly once`);
+    throw new Error(`Pitch must include ${TERMS_TOKEN} exactly once`);
   }
+  if (!terms.trim()) throw new Error("The routine's verbatim terms are not configured");
 
-  return draft.replace(COMMERCIAL_TERMS_TOKEN, () => terms);
+  return draft.replace(TERMS_TOKEN, () => terms);
 }
 
 export function enforceSendGuards(
@@ -109,29 +88,28 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
   try {
     enforceSendGuards(input.db, input);
     const item = getItem(input.db, input.itemId);
+    const routine = getRoutine(input.db, item.routineId);
     const recipient = input.to.trim().toLowerCase();
+    const itemRecipient = item.contactEmail?.trim().toLowerCase();
 
-    if (item.contactEmail && recipient !== item.contactEmail.trim().toLowerCase()) {
-      throw new Error("Recipient must match the item's extracted contact email");
+    if (!itemRecipient || recipient !== itemRecipient) {
+      throw new Error("Recipient must match the item's contact email");
     }
 
-    const terms = formatCommercialTerms(input.commercial);
-    const body = insertCommercialTerms(input.draft, terms);
-    const postingText =
-      item.origin === "scan" &&
-      typeof item.payload === "object" &&
-      item.payload !== null &&
-      "description" in item.payload &&
-      typeof item.payload.description === "string"
-        ? item.payload.description
-        : "";
-    const validation = validatePitch({ pitch: body, postingText, commercialTerms: terms });
-    const subjectValidation = validateSubject({ subject: input.subject, postingText });
-
-    const errors = [...validation.errors, ...subjectValidation.errors];
+    const body = insertVerbatimTerms(input.draft, routine.verbatimTerms);
+    const pitchValidation = validatePitch({
+      pitch: body,
+      verbatimTerms: routine.verbatimTerms,
+      blockedTopics: routine.blockedTopics,
+      requiredDisclosure: routine.requiredDisclosure,
+    });
+    const subjectValidation = validateSubject({
+      subject: input.subject,
+      blockedTopics: routine.blockedTopics,
+    });
+    const errors = [...pitchValidation.errors, ...subjectValidation.errors];
 
     if (errors.length) throw new Error(errors.join("; "));
-    if (!recipient) throw new Error("A recipient email is required");
     if (!input.subject.trim()) throw new Error("A subject is required");
 
     const deliver = input.deliver ?? ((message) => deliverSmtp(message, input.smtp));
@@ -167,8 +145,11 @@ async function deliverSmtp(
   message: { from: string; to: string; subject: string; text: string },
   smtp: SmtpSettings,
 ): Promise<void> {
-  if (!smtp.user || !smtp.password || !smtp.fromAddress) {
-    throw new Error("SMTP credentials and from address must be configured");
+  if (!smtp.host || !smtp.user || !smtp.password || !smtp.fromAddress) {
+    throw new Error("SMTP host, credentials, and from address must be configured");
+  }
+  if (!Number.isInteger(smtp.port) || smtp.port < 1 || smtp.port > 65_535) {
+    throw new Error("SMTP port must be between 1 and 65535");
   }
 
   for (const [name, value] of Object.entries({
@@ -180,9 +161,9 @@ async function deliverSmtp(
   }
 
   const socket = connect({
-    host: "smtp.gmail.com",
-    port: 465,
-    servername: "smtp.gmail.com",
+    host: smtp.host,
+    port: smtp.port,
+    servername: smtp.host,
     rejectUnauthorized: true,
   });
   socket.setTimeout(30_000);
@@ -260,7 +241,10 @@ function createReplyReader(socket: TLSSocket) {
   let buffer = "";
   let current: string[] = [];
   const ready: Reply[] = [];
-  const waiting: Array<{ resolve: (reply: Reply) => void; reject: (error: Error) => void }> = [];
+  const waiting: Array<{
+    resolve: (reply: Reply) => void;
+    reject: (error: Error) => void;
+  }> = [];
 
   const flush = (reply: Reply) => {
     const waiter = waiting.shift();

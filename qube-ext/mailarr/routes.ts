@@ -1,18 +1,23 @@
-import type { Extension, ExtensionContext, RouteRequest } from "@qube-code/extension-sdk";
+import type {
+  Extension,
+  ExtensionContext,
+  RouteRequest,
+} from "@qube-code/extension-sdk";
 import {
   createRoutine,
   createRun,
   getRoutine,
   latestBriefing,
   listItems,
+  listSources,
   openMailarrDatabase,
   pipelineCounts,
   routineDashboard,
+  type RoutineInput,
   setRoutineEnabled,
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
-import { BUILT_IN_SOURCES } from "./lib/sources/catalog.js";
 
 type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
 type ExtensionApp = Parameters<RegisterRoutes>[0];
@@ -28,8 +33,7 @@ export function registerMailarrRoutes(
 
   app.post("/api/mailarr/routines", async (req, reply) =>
     useDb(req, reply, getCtx, (db, ctx) => {
-      const input = routineInput(req.body);
-      const routine = createRoutine(db, input);
+      const routine = createRoutine(db, routineInput(req.body));
 
       ctx.broadcast({ type: "mailarr-changed" });
 
@@ -37,14 +41,20 @@ export function registerMailarrRoutes(
     }),
   );
 
-  app.put<{ Params: { id: string } }>("/api/mailarr/routines/:id", async (req, reply) =>
-    useDb(req, reply, getCtx, (db, ctx) => {
-      const routine = updateRoutine(db, positiveInt(req.params.id, "routine id"), routineInput(req.body));
+  app.put<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const routine = updateRoutine(
+          db,
+          positiveInt(req.params.id, "routine id"),
+          routineInput(req.body),
+        );
 
-      ctx.broadcast({ type: "mailarr-changed" });
+        ctx.broadcast({ type: "mailarr-changed" });
 
-      return { routine };
-    }),
+        return { routine };
+      }),
   );
 
   app.post<{ Params: { id: string } }>(
@@ -64,16 +74,18 @@ export function registerMailarrRoutes(
       }),
   );
 
-  app.post<{ Params: { id: string } }>("/api/mailarr/routines/:id/run", async (req, reply) =>
-    useDb(req, reply, getCtx, (db, ctx) => {
-      const routineId = positiveInt(req.params.id, "routine id");
-      getRoutine(db, routineId);
-      const run = createRun(db, routineId);
+  app.post<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/run",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const routineId = positiveInt(req.params.id, "routine id");
+        getRoutine(db, routineId);
+        const run = createRun(db, routineId);
 
-      ctx.broadcast({ type: "mailarr-changed" });
+        ctx.broadcast({ type: "mailarr-changed" });
 
-      return { run, delivery: "polling fallback" };
-    }),
+        return { run, delivery: "polling fallback" };
+      }),
   );
 
   app.get<{ Params: { id: string }; Querystring: { stage?: string } }>(
@@ -82,10 +94,16 @@ export function registerMailarrRoutes(
       useDb(req, reply, getCtx, (db) => {
         const routineId = positiveInt(req.params.id, "routine id");
         const stage = parseStage(req.query.stage);
-        const items = listItems(db, { routineId, stage, page: 1, pageSize: 500 }).items;
+        const items = listItems(db, {
+          routineId,
+          stage,
+          page: 1,
+          pageSize: 500,
+        }).items;
 
         return {
           routine: getRoutine(db, routineId),
+          sources: listSources(db, routineId),
           counts: pipelineCounts(db, routineId),
           briefing: latestBriefing(db, routineId),
           items,
@@ -120,37 +138,60 @@ async function useDb<T>(
   }
 }
 
-function routineInput(value: unknown): {
-  name: string;
-  cron: string;
-  orderText: string;
-  dailyCap: number;
-  sources: string[] | null;
-} {
+function routineInput(value: unknown): RoutineInput {
   const body = record(value);
-  const name = string(body.name, "name");
-  const cron = string(body.cron, "cron");
-  const orderText = string(body.orderText, "order");
-  const dailyCap = positiveInt(body.dailyCap, "daily cap");
-  const sources = routineSources(body.sources);
+  const keywords = keywordMap(body.keywords);
+  const scoreFloor =
+    keywords === null ? null : nullableInteger(body.scoreFloor, "score floor");
 
-  return { name, cron, orderText, dailyCap, sources };
+  return {
+    name: string(body.name, "name"),
+    cron: string(body.cron, "cron"),
+    orderText: string(body.orderText, "order"),
+    dailyCap: positiveInt(body.dailyCap, "daily cap"),
+    verbatimTerms: string(body.verbatimTerms, "verbatim terms", false),
+    blockedTopics: stringArray(body.blockedTopics, "blocked topics"),
+    requiredDisclosure: nullableString(body.requiredDisclosure),
+    keywords,
+    scoreFloor,
+  };
 }
 
-function routineSources(value: unknown): string[] | null {
-  if (value == null) return null;
-  if (!Array.isArray(value)) throw new Error("sources must be an array");
+function keywordMap(value: unknown): Record<string, number> | null {
+  if (value === null || value === undefined) return null;
+  const map = record(value);
 
-  const valid = new Set<string>(BUILT_IN_SOURCES.map((source) => source.id));
-  const sources = value.map((source) => {
-    if (typeof source !== "string" || !valid.has(source)) {
-      throw new Error(`invalid built-in source: ${String(source)}`);
+  for (const [term, weight] of Object.entries(map)) {
+    if (!term.trim() || typeof weight !== "number" || !Number.isFinite(weight)) {
+      throw new Error("keywords must map non-empty terms to numeric weights");
     }
+  }
 
-    return source;
-  });
+  return map as Record<string, number>;
+}
 
-  return [...new Set(sources)];
+function stringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`${field} must be a string array`);
+  }
+
+  return value;
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") throw new Error("value must be a string or null");
+
+  return value.trim() || null;
+}
+
+function nullableInteger(value: unknown, field: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed)) throw new Error(`${field} must be an integer or null`);
+
+  return parsed;
 }
 
 function parseStage(value: unknown): ItemStage | undefined {
@@ -168,16 +209,24 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function string(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`);
+function string(
+  value: unknown,
+  field: string,
+  trim = true,
+): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field} is required`);
+  }
 
-  return value.trim();
+  return trim ? value.trim() : value;
 }
 
 function positiveInt(value: unknown, field: string): number {
   const parsed = Number(value);
 
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${field} must be a positive integer`);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
 
   return parsed;
 }
