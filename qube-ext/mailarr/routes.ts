@@ -12,7 +12,7 @@ import {
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
-import { BUILT_IN_SOURCES } from "./lib/sources/index.js";
+import { BUILT_IN_SOURCES } from "./lib/sources/catalog.js";
 
 type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
 type ExtensionApp = Parameters<RegisterRoutes>[0];

@@ -12,14 +12,20 @@ import {
   listRoutines,
   openMailarrDatabase,
   startRun,
+  updateItem,
 } from "../lib/db.js";
 import type { NormalizedPosting } from "../lib/model.js";
 import { addItems, scanSources } from "../lib/scan.js";
 import { DEFAULT_SCORE_FLOOR } from "../lib/score.js";
+import { sendFirstContact } from "../lib/send.js";
 import {
   BUILT_IN_SOURCES,
   SOURCES,
 } from "../lib/sources/index.js";
+import {
+  COMMERCIAL_TERMS_TOKEN,
+  SEBE_DISCLOSURE,
+} from "../lib/validate.js";
 
 test("items_add applies scanner guards and refreshes scanned items", async () => {
   const db = testDatabase();
@@ -102,6 +108,11 @@ test("items_add applies scanner guards and refreshes scanned items", async () =>
   assert.equal(refreshed.role, "Senior React Architect");
   assert.equal(refreshed.source, "Agent directory");
   assert.equal(refreshed.contactEmail, "hiring@example.test");
+  assert.equal(refreshed.origin, "scan");
+  assert.equal(
+    (refreshed.payload as { description: string }).description,
+    scanned.description,
+  );
   assert.equal(getItem(db, blacklistedRow.id).contactEmail, null);
   assert.equal(getItem(db, invalidRow.id).contactEmail, null);
   assert.equal(
@@ -116,6 +127,64 @@ test("items_add applies scanner guards and refreshes scanned items", async () =>
     (db.prepare("SELECT found_count FROM runs WHERE id = ?").get(run.id) as { found_count: number })
       .found_count,
     5,
+  );
+  db.close();
+});
+
+test("send pay facts trust scanned descriptions but never intake descriptions", async () => {
+  const db = testDatabase();
+  const routine = createRoutine(db, {
+    name: "Pay provenance",
+    cron: "0 9 * * *",
+    orderText: "Test trusted descriptions",
+    dailyCap: 5,
+    sources: [],
+  });
+  const run = startRun(db, createRun(db, routine.id).id);
+  const intake = addItems(db, routine.id, run.id, [
+    {
+      company: "Intake Pay Co",
+      role: "Senior TypeScript Engineer",
+      url: "https://example.test/intake-pay",
+      sourceLabel: "Agent directory",
+      contactEmail: "person@intake-pay.test",
+      description: "Senior TypeScript role paying $90/hr.",
+    },
+  ]);
+  const intakeRow = db
+    .prepare("SELECT id FROM items WHERE normalized_company = 'intake pay co'")
+    .get() as { id: number };
+
+  assert.equal(intake.results[0].status, "inserted");
+  assert.equal(getItem(db, intakeRow.id).origin, "intake");
+  updateItem(db, intakeRow.id, { stage: "qualified" });
+  await assert.rejects(
+    () =>
+      sendFirstContact({
+        ...sendRequest(db, run.id, intakeRow.id, "person@intake-pay.test"),
+        draft: `${SEBE_DISCLOSURE}\nThe role pays $90/hr.\n${COMMERCIAL_TERMS_TOKEN}`,
+      }),
+    /pay fact absent from the posting/i,
+  );
+
+  const scanned = posting("Scanned Pay Co", "https://example.test/scanned-pay", "$90/hr");
+  await scanSources(db, run.id, DEFAULT_SCORE_FLOOR, async () => ({
+    postings: [scanned],
+    errors: [],
+    failedSources: 0,
+    enabledSources: 1,
+  }));
+  const scannedRow = db
+    .prepare("SELECT id FROM items WHERE normalized_company = 'scanned pay co'")
+    .get() as { id: number };
+
+  assert.equal(getItem(db, scannedRow.id).origin, "scan");
+  updateItem(db, scannedRow.id, { stage: "qualified" });
+  await assert.doesNotReject(() =>
+    sendFirstContact({
+      ...sendRequest(db, run.id, scannedRow.id, "person@example.test"),
+      draft: `${SEBE_DISCLOSURE}\nThe role pays $90/hr.\n${COMMERCIAL_TERMS_TOKEN}`,
+    }),
   );
   db.close();
 });
@@ -171,6 +240,70 @@ test("scan_sources filters to the routine subset and fails against the enabled c
   db.close();
 });
 
+test("items_add before scan preserves both found counts", async () => {
+  const db = testDatabase();
+  const routine = createRoutine(db, {
+    name: "Count ordering",
+    cron: "0 9 * * *",
+    orderText: "Mix generic and built-in sources",
+    dailyCap: 5,
+  });
+  const run = startRun(db, createRun(db, routine.id).id);
+
+  addItems(db, routine.id, run.id, [
+    {
+      company: "Intake Count Co",
+      role: "Senior TypeScript Engineer",
+      url: "https://example.test/intake-count",
+      sourceLabel: "Agent directory",
+    },
+  ]);
+  await scanSources(db, run.id, DEFAULT_SCORE_FLOOR, async () => ({
+    postings: [posting("Scan Count Co", "https://example.test/scan-count")],
+    errors: [],
+    failedSources: 0,
+    enabledSources: BUILT_IN_SOURCES.length,
+  }));
+
+  assert.equal(
+    (db.prepare("SELECT found_count FROM runs WHERE id = ?").get(run.id) as { found_count: number })
+      .found_count,
+    2,
+  );
+  db.close();
+});
+
+test("empty built-in sources are a successful no-op and intake remains available", async () => {
+  const db = testDatabase();
+  const routine = createRoutine(db, {
+    name: "Intake only",
+    cron: "0 9 * * *",
+    orderText: "Use only external sources",
+    dailyCap: 5,
+    sources: [],
+  });
+  const run = startRun(db, createRun(db, routine.id).id);
+  const scan = await scanSources(db, run.id);
+  const intake = addItems(db, routine.id, run.id, [
+    {
+      company: "External Co",
+      role: "Senior TypeScript Engineer",
+      url: "https://example.test/external",
+      sourceLabel: "External directory",
+    },
+  ]);
+
+  assert.equal(scan.found, 0);
+  assert.equal(scan.fullyFailed, false);
+  assert.equal(getRoutine(db, routine.id).sources?.length, 0);
+  assert.equal(
+    (db.prepare("SELECT status FROM runs WHERE id = ?").get(run.id) as { status: string }).status,
+    "running",
+  );
+  assert.equal(intake.inserted, 1);
+  db.close();
+});
+
 test("migration upgrades v2 routines with null sources", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "mailarr-v2-sources-test-"));
   const path = join(dataDir, "mailarr.db");
@@ -200,7 +333,7 @@ test("migration upgrades v2 routines with null sources", () => {
 
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-    3,
+    4,
   );
   assert.equal(getRoutine(db, 1).sources, null);
   assert.equal(
@@ -208,6 +341,57 @@ test("migration upgrades v2 routines with null sources", () => {
       ({ name }) => name === "sources",
     ),
     true,
+  );
+  db.close();
+});
+
+test("migration marks pre-provenance items as scan-origin", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "mailarr-v3-origin-test-"));
+  const path = join(dataDir, "mailarr.db");
+  let db = new DatabaseSync(path);
+
+  db.exec(`
+    CREATE TABLE items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      routine_id INTEGER NOT NULL,
+      run_id INTEGER NOT NULL,
+      stage TEXT NOT NULL,
+      company TEXT NOT NULL,
+      normalized_company TEXT NOT NULL,
+      role TEXT NOT NULL,
+      rate_info TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL,
+      url TEXT NOT NULL,
+      contact_email TEXT,
+      score INTEGER NOT NULL DEFAULT 0,
+      fit_notes TEXT,
+      draft_pitch TEXT,
+      sent_pitch TEXT,
+      drop_reason TEXT,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (normalized_company, url)
+    );
+    INSERT INTO items (
+      routine_id, run_id, stage, company, normalized_company, role, rate_info,
+      source, url, contact_email, score, payload_json, created_at, updated_at
+    ) VALUES (
+      1, 1, 'discovered', 'Legacy Item', 'legacy item', 'Senior TypeScript Engineer',
+      '', 'RemoteOK', 'https://example.test/legacy', NULL, 3,
+      '{"description":"Trusted legacy scan"}',
+      '2026-07-28T00:00:00.000Z', '2026-07-28T00:00:00.000Z'
+    );
+    PRAGMA user_version = 3;
+  `);
+  db.close();
+
+  db = openMailarrDatabase(dataDir);
+
+  assert.equal(getItem(db, 1).origin, "scan");
+  assert.equal(
+    (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+    4,
   );
   db.close();
 });
@@ -222,7 +406,7 @@ test("fresh migration seeds Job Scout with every built-in source enabled", () =>
 
   assert.equal(
     (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-    3,
+    4,
   );
   assert.equal(jobScout.sources, null);
   assert.deepEqual(enabledSources, BUILT_IN_SOURCES.map((source) => source.id));
@@ -233,16 +417,46 @@ function testDatabase() {
   return openMailarrDatabase(mkdtempSync(join(tmpdir(), "mailarr-generic-test-")));
 }
 
-function posting(company: string, url: string): NormalizedPosting {
+function posting(company: string, url: string, payFact?: string): NormalizedPosting {
   return {
     company,
     role: "Senior TypeScript Engineer",
     rateInfo: "$100/hr",
     source: "RemoteOK",
     url,
-    description:
-      "Senior TypeScript and React engineer. Apply by email to person@example.test.",
+    description: [
+      "Senior TypeScript and React engineer.",
+      payFact ? `Compensation is ${payFact}.` : "",
+      "Apply by email to person@example.test.",
+    ]
+      .filter(Boolean)
+      .join(" "),
     publishedAt: null,
     payload: { captured: true },
+  };
+}
+
+function sendRequest(
+  db: ReturnType<typeof testDatabase>,
+  runId: number,
+  itemId: number,
+  to: string,
+) {
+  return {
+    db,
+    runId,
+    itemId,
+    to,
+    subject: "Senior TypeScript role",
+    draft: `${SEBE_DISCLOSURE}\nHello.\n${COMMERCIAL_TERMS_TOKEN}`,
+    commercial: {
+      hourlyFloor: "TEST 10",
+      targetRate: "TEST 20",
+      premiumBand: "TEST 30 to TEST 40",
+      weeklyHours: "TEST 5",
+    },
+    smtp: { user: "", password: "", fromAddress: "" },
+    dryRun: true,
+    deliver: async () => {},
   };
 }

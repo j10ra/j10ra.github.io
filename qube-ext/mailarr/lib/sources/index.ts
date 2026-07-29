@@ -1,4 +1,5 @@
 import type { NormalizedPosting } from "../model.js";
+import { BUILT_IN_SOURCES, type BuiltInSourceId } from "./catalog.js";
 import { fetchArbeitnow } from "./arbeitnow.js";
 import { fetchHnHiring } from "./hn.js";
 import { fetchJobicy } from "./jobicy.js";
@@ -13,16 +14,7 @@ export interface ScanFetchResult {
   enabledSources: number;
 }
 
-export const BUILT_IN_SOURCES = [
-  { id: "remoteok", label: "RemoteOK" },
-  { id: "remotive", label: "Remotive" },
-  { id: "weworkremotely", label: "WeWorkRemotely" },
-  { id: "arbeitnow", label: "Arbeitnow" },
-  { id: "jobicy", label: "Jobicy" },
-  { id: "hn", label: "HN Who is hiring" },
-] as const;
-
-export type BuiltInSourceId = (typeof BUILT_IN_SOURCES)[number]["id"];
+export { BUILT_IN_SOURCES, type BuiltInSourceId } from "./catalog.js";
 
 export const SOURCES: Array<{
   id: BuiltInSourceId;

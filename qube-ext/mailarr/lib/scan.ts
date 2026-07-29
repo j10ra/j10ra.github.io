@@ -151,6 +151,7 @@ export function addItems(
       posting,
       scored.score,
       item.contactEmail ? filterContactEmail(item.contactEmail) : null,
+      "intake",
     );
 
     if (status === "inserted") inserted += 1;

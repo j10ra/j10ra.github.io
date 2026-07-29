@@ -17,7 +17,7 @@ import {
   request,
   type WebExtension,
 } from "@qube-code/extension-sdk/web";
-import { BUILT_IN_SOURCES } from "../lib/sources/index.js";
+import { BUILT_IN_SOURCES } from "../lib/sources/catalog.js";
 
 type RunStatus = "pending" | "running" | "done" | "failed";
 type Stage = "discovered" | "qualified" | "contacted" | "replied" | "dropped";
@@ -77,7 +77,7 @@ interface RoutineForm {
   cron: string;
   orderText: string;
   dailyCap: number;
-  sources: string[];
+  sources: string[] | null;
 }
 
 const EMPTY_FORM: RoutineForm = {
@@ -85,7 +85,7 @@ const EMPTY_FORM: RoutineForm = {
   cron: "0 9 * * *",
   orderText: "",
   dailyCap: 5,
-  sources: BUILT_IN_SOURCES.map((source) => source.id),
+  sources: null,
 };
 
 const STAGES: Array<{ key: "all" | Stage; label: string }> = [
@@ -216,8 +216,7 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                   cron: routine.cron,
                   orderText: routine.orderText,
                   dailyCap: routine.dailyCap,
-                  sources:
-                    routine.sources ?? BUILT_IN_SOURCES.map((source) => source.id),
+                  sources: routine.sources,
                 })
               }
               onToggle={() =>
@@ -386,6 +385,19 @@ function RoutineEditor({
             Built-in sources
           </p>
           <div className="flex flex-wrap gap-x-3 gap-y-1 rounded border border-border bg-background px-2 py-1.5">
+            <label className="flex w-full cursor-pointer items-center gap-1 border-b border-border pb-1 text-[10px] font-medium text-foreground">
+              <input
+                type="checkbox"
+                checked={value.sources === null}
+                onChange={(event) =>
+                  onChange({
+                    ...value,
+                    sources: event.target.checked ? null : [],
+                  })
+                }
+              />
+              All built-in sources
+            </label>
             {BUILT_IN_SOURCES.map((source) => (
               <label
                 key={source.id}
@@ -393,13 +405,17 @@ function RoutineEditor({
               >
                 <input
                   type="checkbox"
-                  checked={value.sources.includes(source.id)}
+                  checked={
+                    value.sources === null || value.sources.includes(source.id)
+                  }
                   onChange={(event) =>
                     onChange({
                       ...value,
-                      sources: event.target.checked
-                        ? [...value.sources, source.id]
-                        : value.sources.filter((id) => id !== source.id),
+                      sources: toggleRoutineSource(
+                        value.sources,
+                        source.id,
+                        event.target.checked,
+                      ),
                     })
                   }
                 />
@@ -426,6 +442,19 @@ function RoutineEditor({
       </div>
     </div>
   );
+}
+
+function toggleRoutineSource(
+  sources: string[] | null,
+  sourceId: string,
+  enabled: boolean,
+): string[] | null {
+  const selected = sources ?? BUILT_IN_SOURCES.map((source) => source.id);
+  const next = enabled
+    ? [...new Set([...selected, sourceId])]
+    : selected.filter((id) => id !== sourceId);
+
+  return next.length === BUILT_IN_SOURCES.length ? null : next;
 }
 
 function PipelineView({ routineId }: { routineId: number }) {

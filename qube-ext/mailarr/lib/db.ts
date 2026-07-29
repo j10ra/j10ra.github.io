@@ -1,7 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Item, ItemStage, NormalizedPosting, Routine, Run, RunStatus } from "./model.js";
+import type {
+  Item,
+  ItemOrigin,
+  ItemStage,
+  NormalizedPosting,
+  Routine,
+  Run,
+  RunStatus,
+} from "./model.js";
 
 const JOB_SCOUT_ORDER = [
   "Scan every configured source.",
@@ -75,6 +83,7 @@ export function migrate(db: DatabaseSync): void {
       role TEXT NOT NULL,
       rate_info TEXT NOT NULL DEFAULT '',
       source TEXT NOT NULL,
+      origin TEXT NOT NULL DEFAULT 'scan' CHECK (origin IN ('scan', 'intake')),
       url TEXT NOT NULL,
       contact_email TEXT,
       score INTEGER NOT NULL DEFAULT 0,
@@ -111,6 +120,7 @@ export function migrate(db: DatabaseSync): void {
   if (version < 1) seedInitialData(db);
   if (version < 2) migrateLegacySentLog(db);
   if (version < 3) migrateRoutineSources(db);
+  if (version < 4) migrateItemOrigins(db);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
@@ -121,7 +131,7 @@ export function migrate(db: DatabaseSync): void {
       WHERE dry_run = 0;
   `);
 
-  db.exec("PRAGMA user_version = 3");
+  db.exec("PRAGMA user_version = 4");
 }
 
 function migrateRoutineSources(db: DatabaseSync): void {
@@ -129,6 +139,18 @@ function migrateRoutineSources(db: DatabaseSync): void {
 
   if (!columns.some((column) => column.name === "sources")) {
     db.exec("ALTER TABLE routines ADD COLUMN sources TEXT");
+  }
+}
+
+function migrateItemOrigins(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(items)").all() as Array<{ name: string }>;
+
+  if (!columns.some((column) => column.name === "origin")) {
+    db.exec(`
+      ALTER TABLE items
+      ADD COLUMN origin TEXT NOT NULL DEFAULT 'scan'
+        CHECK (origin IN ('scan', 'intake'))
+    `);
   }
 }
 
@@ -389,7 +411,7 @@ export function recordScanResult(
   const result = db
     .prepare(`
       UPDATE runs
-      SET found_count = ?,
+      SET found_count = found_count + ?,
           error_text = ?,
           status = CASE WHEN ? = 1 THEN 'failed' ELSE status END,
           finished_at = CASE WHEN ? = 1 THEN ? ELSE finished_at END
@@ -423,20 +445,21 @@ export function insertPosting(
   posting: NormalizedPosting,
   score: number,
   contactEmail: string | null,
+  origin: ItemOrigin = "scan",
 ): "inserted" | "refreshed" | "ignored" {
   const at = nowIso();
   const normalizedCompany = normalizeCompany(posting.company);
-  const payloadJson = JSON.stringify({
+  const payload = {
     raw: posting.payload,
     description: posting.description,
     publishedAt: posting.publishedAt,
-  });
+  };
   const result = db
     .prepare(`
       INSERT OR IGNORE INTO items (
-        routine_id, run_id, stage, company, normalized_company, role, rate_info, source,
+        routine_id, run_id, stage, company, normalized_company, role, rate_info, source, origin,
         url, contact_email, score, payload_json, created_at, updated_at
-      ) VALUES (?, ?, 'discovered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, 'discovered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       routineId,
@@ -446,16 +469,42 @@ export function insertPosting(
       posting.role,
       posting.rateInfo,
       posting.source,
+      origin,
       posting.url,
       contactEmail,
       score,
-      payloadJson,
+      JSON.stringify(payload),
       at,
       at,
     );
 
   if (result.changes > 0) return "inserted";
 
+  const existing = db
+    .prepare(`
+      SELECT origin, payload_json
+      FROM items
+      WHERE normalized_company = ? AND url = ?
+    `)
+    .get(normalizedCompany, posting.url) as
+    | { origin: ItemOrigin; payload_json: string }
+    | undefined;
+
+  if (!existing) throw new Error("posting conflict could not be resolved");
+
+  const preserveScannedDescription = origin === "intake" && existing.origin === "scan";
+  const existingPayload = JSON.parse(existing.payload_json) as Record<string, unknown>;
+  const nextPayload = preserveScannedDescription
+    ? {
+        ...payload,
+        description:
+          typeof existingPayload.description === "string"
+            ? existingPayload.description
+            : "",
+      }
+    : payload;
+  const nextOrigin: ItemOrigin =
+    origin === "scan" || existing.origin === "scan" ? "scan" : "intake";
   const refreshed = db
     .prepare(`
       UPDATE items
@@ -466,6 +515,7 @@ export function insertPosting(
           source = ?,
           contact_email = COALESCE(?, contact_email),
           score = ?,
+          origin = ?,
           payload_json = ?,
           updated_at = ?
       WHERE normalized_company = ?
@@ -481,7 +531,8 @@ export function insertPosting(
       posting.source,
       contactEmail,
       score,
-      payloadJson,
+      nextOrigin,
+      JSON.stringify(nextPayload),
       at,
       normalizedCompany,
       posting.url,
@@ -819,6 +870,7 @@ function itemFromRow(row: DbRow): Item {
     role: String(row.role),
     rateInfo: String(row.rate_info),
     source: String(row.source),
+    origin: String(row.origin) as ItemOrigin,
     url: String(row.url),
     contactEmail: row.contact_email ? String(row.contact_email) : null,
     score: Number(row.score),
