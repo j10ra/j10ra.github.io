@@ -81,6 +81,7 @@ test("fresh schema is version 1 and seeds disabled routine data with permanent h
     assert.equal(routines.length, 1);
     assert.equal(routines[0].enabled, 0);
     assert.equal(routines[0].frozen, 0);
+    assert.equal(routines[0].frozen_at, null);
     assert.equal(routines[0].session, null);
     assert.equal(routines[0].session_label, null);
     assert.equal(routines[0].keywords, null);
@@ -347,26 +348,33 @@ test("routine dashboard reports whether a run is pending", () => {
 
     assert.equal(dashboardRoutine()?.hasPendingRun, false);
     assert.equal(dashboardRoutine()?.pendingRun, null);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 0);
     const run = createRun(db, routine.id);
 
     assert.equal(dashboardRoutine()?.hasPendingRun, true);
     assert.equal(dashboardRoutine()?.pendingRun?.id, run.id);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 1);
     startRun(db, run.id);
     assert.equal(dashboardRoutine()?.hasPendingRun, false);
     assert.equal(dashboardRoutine()?.pendingRun, null);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 0);
   });
 });
 
-test("panel cancellation fails a pending run and clears the escape hatch", async () => {
+test("panel cancellation clears one pending run or the full stack", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const db = openMailarrDatabase(dataDir);
     let routineId: number;
-    let runId: number;
+    let runIds: number[];
 
     try {
       const routine = createTestRoutine(db);
       routineId = routine.id;
-      runId = createRun(db, routine.id).id;
+      runIds = [
+        createRun(db, routine.id).id,
+        createRun(db, routine.id).id,
+        createRun(db, routine.id).id,
+      ];
     } finally {
       db.close();
     }
@@ -376,21 +384,60 @@ test("panel cancellation fails a pending run and clears the escape hatch", async
       "/api/mailarr/routines/:id/cancel-pending",
       {},
       { id: String(routineId) },
-    )) as { run: { id: number; status: string; errorText: string | null } };
+    )) as {
+      run: { id: number; status: string; errorText: string | null };
+      cancelled: number;
+    };
 
-    assert.equal(response.run.id, runId);
+    assert.equal(response.cancelled, 1);
+    assert.equal(response.run.id, runIds[0]);
     assert.equal(response.run.status, "failed");
     assert.equal(response.run.errorText, "cancelled from panel");
 
     const reopened = openMailarrDatabase(dataDir);
     try {
-      assert.equal(
-        routineDashboard(reopened).find((routine) => routine.id === routineId)
-          ?.pendingRun,
-        null,
+      const dashboard = routineDashboard(reopened).find(
+        (routine) => routine.id === routineId,
       );
+
+      assert.equal(dashboard?.pendingRun?.id, runIds[1]);
+      assert.equal(dashboard?.pendingRunCount, 2);
     } finally {
       reopened.close();
+    }
+
+    const allResponse = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/cancel-pending",
+      { all: true },
+      { id: String(routineId) },
+    )) as {
+      runs: Array<{ id: number; status: string; errorText: string | null }>;
+      cancelled: number;
+    };
+
+    assert.equal(allResponse.cancelled, 2);
+    assert.deepEqual(
+      allResponse.runs.map((run) => run.id),
+      runIds.slice(1),
+    );
+    assert.ok(
+      allResponse.runs.every(
+        (run) =>
+          run.status === "failed" && run.errorText === "cancelled from panel",
+      ),
+    );
+
+    const final = openMailarrDatabase(dataDir);
+    try {
+      const dashboard = routineDashboard(final).find(
+        (routine) => routine.id === routineId,
+      );
+
+      assert.equal(dashboard?.pendingRun, null);
+      assert.equal(dashboard?.pendingRunCount, 0);
+    } finally {
+      final.close();
     }
   });
 });
@@ -602,6 +649,7 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         "session_label",
         "enabled",
         "frozen",
+        "frozen_at",
       ]) {
         assert.doesNotMatch(writableSchemas, new RegExp(field));
       }
@@ -633,6 +681,118 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         assert.match(JSON.stringify(response), /routine is frozen/iu);
       }
     }, dataDir);
+  });
+});
+
+test("freeze stamps review time and refreeze clears edited state", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const created = (await routes.call("POST", "/api/mailarr/routines", {
+      ...BASE_ROUTINE,
+      name: "Informed freeze routine",
+    })) as RoutineResponse;
+    const routineId = created.routine.id;
+
+    assert.equal(created.routine.frozenAt, null);
+    assert.equal(created.routine.editedSinceFreeze, true);
+
+    const firstFreeze = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: created.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(firstFreeze.routine.frozen, true);
+    assert.ok(firstFreeze.routine.frozenAt);
+    assert.equal(firstFreeze.routine.editedSinceFreeze, false);
+    assert.equal(firstFreeze.routine.updatedAt, firstFreeze.routine.frozenAt);
+
+    const unfrozen = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      { frozen: false },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(unfrozen.routine.frozen, false);
+    assert.equal(unfrozen.routine.frozenAt, firstFreeze.routine.frozenAt);
+    assert.equal(unfrozen.routine.editedSinceFreeze, true);
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "routine_update",
+        arguments: {
+          routine_id: routineId,
+          order_text: "Agent-edited after review.",
+        },
+      });
+
+      assert.equal(response.isError, undefined);
+    }, dataDir);
+
+    let editedUpdatedAt: string;
+    const editedDb = openMailarrDatabase(dataDir);
+    try {
+      const edited = getRoutine(editedDb, routineId);
+
+      editedUpdatedAt = edited.updatedAt;
+      assert.equal(edited.editedSinceFreeze, true);
+      assert.ok(edited.updatedAt > unfrozen.routine.updatedAt);
+      assert.ok(edited.updatedAt > (edited.frozenAt ?? ""));
+    } finally {
+      editedDb.close();
+    }
+
+    const currentReview = (await routes.call(
+      "GET",
+      "/api/mailarr/routines/:id",
+      undefined,
+      { id: String(routineId) },
+    )) as {
+      routine: {
+        orderText: string;
+        updatedAt: string;
+        editedSinceFreeze: boolean;
+      };
+    };
+
+    assert.equal(currentReview.routine.orderText, "Agent-edited after review.");
+    assert.equal(currentReview.routine.updatedAt, editedUpdatedAt);
+    assert.equal(currentReview.routine.editedSinceFreeze, true);
+
+    const staleConfirmation = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: unfrozen.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as { status: number; body: { error: string } };
+
+    assert.equal(staleConfirmation.status, 400);
+    assert.match(staleConfirmation.body.error, /review current values/);
+
+    const refrozen = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: currentReview.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(refrozen.routine.frozen, true);
+    assert.ok(
+      (refrozen.routine.frozenAt ?? "") >
+        (firstFreeze.routine.frozenAt ?? ""),
+    );
+    assert.equal(refrozen.routine.updatedAt, refrozen.routine.frozenAt);
+    assert.equal(refrozen.routine.editedSinceFreeze, false);
   });
 });
 
@@ -730,7 +890,10 @@ test("unlock edit send fails, then panel freeze enforces current content guards"
       const frozen = (await routes.call(
         "POST",
         "/api/mailarr/routines/:id/freeze",
-        { frozen: true },
+        {
+          frozen: true,
+          reviewedUpdatedAt: edited.updatedAt,
+        },
         { id: String(routineId) },
       )) as RoutineResponse;
 
@@ -1124,6 +1287,9 @@ interface RoutineResponse {
     session: string | null;
     sessionLabel: string | null;
     frozen: boolean;
+    frozenAt: string | null;
+    editedSinceFreeze: boolean;
+    updatedAt: string;
   };
 }
 

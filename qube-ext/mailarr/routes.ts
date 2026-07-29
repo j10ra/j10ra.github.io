@@ -4,7 +4,7 @@ import type {
   RouteRequest,
 } from "@qube-code/extension-sdk";
 import {
-  cancelPendingRun,
+  cancelPendingRuns,
   createRoutine,
   createRun,
   getRoutine,
@@ -31,6 +31,14 @@ export function registerMailarrRoutes(
 ): void {
   app.get("/api/mailarr/routines", async (req, reply) =>
     useDb(req, reply, getCtx, (db) => ({ routines: routineDashboard(db) })),
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db) => ({
+        routine: getRoutine(db, positiveInt(req.params.id, "routine id")),
+      })),
   );
 
   app.post("/api/mailarr/routines", async (req, reply) =>
@@ -81,11 +89,24 @@ export function registerMailarrRoutes(
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
         const body = record(req.body);
-        const routine = setRoutineFrozen(
-          db,
-          positiveInt(req.params.id, "routine id"),
-          boolean(body.frozen, "frozen"),
-        );
+        const routineId = positiveInt(req.params.id, "routine id");
+        const frozen = boolean(body.frozen, "frozen");
+
+        if (frozen) {
+          const current = getRoutine(db, routineId);
+          const reviewedUpdatedAt = string(
+            body.reviewedUpdatedAt,
+            "reviewed updated time",
+          );
+
+          if (current.updatedAt !== reviewedUpdatedAt) {
+            throw new Error(
+              "routine content changed after review; review current values before freezing",
+            );
+          }
+        }
+
+        const routine = setRoutineFrozen(db, routineId, frozen);
 
         ctx.broadcast({ type: "mailarr-changed" });
 
@@ -111,14 +132,16 @@ export function registerMailarrRoutes(
     "/api/mailarr/routines/:id/cancel-pending",
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
-        const run = cancelPendingRun(
+        const body = record(req.body);
+        const runs = cancelPendingRuns(
           db,
           positiveInt(req.params.id, "routine id"),
+          optionalBoolean(body.all, "all") ?? false,
         );
 
         ctx.broadcast({ type: "mailarr-changed" });
 
-        return { run };
+        return { run: runs[0], runs, cancelled: runs.length };
       }),
   );
 
@@ -239,6 +262,12 @@ function boolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
 
   return value;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+
+  return boolean(value, field);
 }
 
 function parseStage(value: unknown): ItemStage | undefined {

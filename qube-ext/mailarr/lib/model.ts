@@ -26,6 +26,8 @@ export interface Routine {
   scoreFloor: number | null;
   enabled: boolean;
   frozen: boolean;
+  frozenAt: string | null;
+  editedSinceFreeze: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -41,9 +41,13 @@ interface Routine {
   scoreFloor: number | null;
   enabled: boolean;
   frozen: boolean;
+  frozenAt: string | null;
+  editedSinceFreeze: boolean;
+  updatedAt: string;
   lastRun: Run | null;
   hasPendingRun: boolean;
   pendingRun: Run | null;
+  pendingRunCount: number;
   newLeads: number;
   sentToday: number;
 }
@@ -205,6 +209,7 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [editing, setEditing] = useState<Routine | "new" | null>(null);
+  const [reviewingFreeze, setReviewingFreeze] = useState<Routine | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -221,6 +226,19 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
     }
   };
 
+  const reviewFreeze = async (routineId: number) => {
+    try {
+      const result = await request<{ routine: Routine }>(
+        `/api/mailarr/routines/${routineId}`,
+      );
+
+      setReviewingFreeze(result.routine);
+      setError(null);
+    } catch (nextError) {
+      setError(message(nextError));
+    }
+  };
+
   useEffect(() => {
     void load();
   }, []);
@@ -234,6 +252,30 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
           setEditing(null);
           await load();
         }}
+      />
+    );
+  }
+
+  if (reviewingFreeze) {
+    return (
+      <FreezeReview
+        error={error}
+        routine={reviewingFreeze}
+        onCancel={() => setReviewingFreeze(null)}
+        onConfirm={() =>
+          mutate(
+            `/api/mailarr/routines/${reviewingFreeze.id}/freeze`,
+            {
+              frozen: true,
+              reviewedUpdatedAt: reviewingFreeze.updatedAt,
+            },
+            async () => {
+              setReviewingFreeze(null);
+              await load();
+            },
+            setError,
+          )
+        }
       />
     );
   }
@@ -298,6 +340,9 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                     {routine.name}
                   </span>
                   <FreezeBadge frozen={routine.frozen} />
+                  {routine.editedSinceFreeze && !routine.frozen && (
+                    <EditedSinceFreezeBadge />
+                  )}
                 </span>
                 <span className="text-[11px] text-muted-foreground">{routine.cron}</span>
               </div>
@@ -335,18 +380,22 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                     )
                   }
                 />
-                <Toggle
-                  checked={routine.frozen}
-                  label="Frozen"
-                  onChange={(frozen) =>
-                    void mutate(
-                      `/api/mailarr/routines/${routine.id}/freeze`,
-                      { frozen },
-                      load,
-                      setError,
-                    )
+                <button
+                  className="rounded-md border border-border px-2 py-1 text-xs outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+                  type="button"
+                  onClick={() =>
+                    routine.frozen
+                      ? void mutate(
+                          `/api/mailarr/routines/${routine.id}/freeze`,
+                          { frozen: false },
+                          load,
+                          setError,
+                        )
+                      : void reviewFreeze(routine.id)
                   }
-                />
+                >
+                  {routine.frozen ? "Unfreeze" : "Review and freeze"}
+                </button>
               </div>
               <div className="flex gap-1">
                 <IconButton
@@ -388,6 +437,23 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                       }
                       icon={<XCircle size={14} />}
                     />
+                    {routine.pendingRunCount > 1 && (
+                      <button
+                        className="rounded-md border border-destructive/50 px-1.5 text-[11px] text-destructive outline-none hover:bg-destructive/10 focus-visible:ring-3 focus-visible:ring-ring/50"
+                        type="button"
+                        title={`Cancel all ${routine.pendingRunCount} pending runs`}
+                        onClick={() =>
+                          void mutate(
+                            `/api/mailarr/routines/${routine.id}/cancel-pending`,
+                            { all: true },
+                            load,
+                            setError,
+                          )
+                        }
+                      >
+                        all
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -847,6 +913,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
   const [stage, setStage] = useState<"all" | Stage>("all");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reviewingFreeze, setReviewingFreeze] = useState(false);
 
   const load = async () => {
     try {
@@ -860,11 +927,32 @@ function PipelineEditor({ routineId }: { routineId: number }) {
     }
   };
 
+  const reviewFreeze = async () => {
+    try {
+      const result = await request<{ routine: Routine }>(
+        `/api/mailarr/routines/${routineId}`,
+      );
+
+      setPipeline((current) =>
+        current
+          ? {
+              ...current,
+              routine: { ...current.routine, ...result.routine },
+            }
+          : current,
+      );
+      setReviewingFreeze(true);
+      setError(null);
+    } catch (nextError) {
+      setError(message(nextError));
+    }
+  };
+
   useEffect(() => {
     void load();
   }, [routineId, stage]);
 
-  if (error) {
+  if (error && !reviewingFreeze) {
     return (
       <div className="p-4">
         <Notice tone="error">{error}</Notice>
@@ -874,6 +962,33 @@ function PipelineEditor({ routineId }: { routineId: number }) {
 
   if (!pipeline) {
     return <p className="p-4 text-sm text-muted-foreground">Loading pipeline...</p>;
+  }
+
+  if (reviewingFreeze) {
+    return (
+      <FreezeReview
+        error={error}
+        routine={pipeline.routine}
+        onCancel={() => {
+          setReviewingFreeze(false);
+          setError(null);
+        }}
+        onConfirm={() =>
+          mutate(
+            `/api/mailarr/routines/${pipeline.routine.id}/freeze`,
+            {
+              frozen: true,
+              reviewedUpdatedAt: pipeline.routine.updatedAt,
+            },
+            async () => {
+              setReviewingFreeze(false);
+              await load();
+            },
+            setError,
+          )
+        }
+      />
+    );
   }
 
   return (
@@ -892,6 +1007,9 @@ function PipelineEditor({ routineId }: { routineId: number }) {
               {pipeline.routine.enabled ? "enabled" : "disabled"}
             </span>
             <FreezeBadge frozen={pipeline.routine.frozen} />
+            {pipeline.routine.editedSinceFreeze && !pipeline.routine.frozen && (
+              <EditedSinceFreezeBadge />
+            )}
           </div>
           <p className="mt-1 font-mono text-xs text-muted-foreground">
             {pipeline.routine.cron}
@@ -906,6 +1024,22 @@ function PipelineEditor({ routineId }: { routineId: number }) {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+            type="button"
+            onClick={() =>
+              pipeline.routine.frozen
+                ? void mutate(
+                    `/api/mailarr/routines/${pipeline.routine.id}/freeze`,
+                    { frozen: false },
+                    load,
+                    setError,
+                  )
+                : void reviewFreeze()
+            }
+          >
+            {pipeline.routine.frozen ? "Unfreeze" : "Review and freeze"}
+          </button>
           <button
             className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background"
             type="button"
@@ -947,6 +1081,22 @@ function PipelineEditor({ routineId }: { routineId: number }) {
                 <XCircle size={15} />
                 Cancel pending
               </button>
+              {pipeline.routine.pendingRunCount > 1 && (
+                <button
+                  className="rounded-md border border-destructive/50 px-3 py-2 text-sm text-destructive outline-none hover:bg-destructive/10 focus-visible:ring-3 focus-visible:ring-ring/50"
+                  type="button"
+                  onClick={() =>
+                    void mutate(
+                      `/api/mailarr/routines/${pipeline.routine.id}/cancel-pending`,
+                      { all: true },
+                      load,
+                      setError,
+                    )
+                  }
+                >
+                  Cancel all ({pipeline.routine.pendingRunCount})
+                </button>
+              )}
             </>
           )}
           <button
@@ -1182,6 +1332,92 @@ function FreezeBadge({ frozen }: { frozen: boolean }) {
     >
       {frozen ? "frozen" : "unlocked"}
     </span>
+  );
+}
+
+function EditedSinceFreezeBadge() {
+  return (
+    <span className="shrink-0 rounded-full border border-amber-500/50 px-2 py-0.5 text-[10px] font-medium text-amber-500">
+      content edited since last freeze
+    </span>
+  );
+}
+
+function FreezeReview({
+  error,
+  routine,
+  onCancel,
+  onConfirm,
+}: {
+  error: string | null;
+  routine: Routine;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const values = [
+    ["order_text", routine.orderText],
+    ["verbatim_terms", routine.verbatimTerms],
+    ["blocked_topics", JSON.stringify(routine.blockedTopics, null, 2)],
+    ["required_disclosure", routine.requiredDisclosure ?? "null"],
+    ["keywords", JSON.stringify(routine.keywords, null, 2)],
+    [
+      "score_floor",
+      routine.scoreFloor === null ? "null" : String(routine.scoreFloor),
+    ],
+  ] as const;
+  const confirm = async () => {
+    setConfirming(true);
+    try {
+      await onConfirm();
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col gap-4 overflow-auto p-4 text-foreground">
+      <div>
+        <h2 className="text-base font-semibold">Review and freeze {routine.name}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Confirm the current agent-authorable content before enabling sends.
+        </p>
+        {routine.editedSinceFreeze && (
+          <div className="mt-2">
+            <EditedSinceFreezeBadge />
+          </div>
+        )}
+      </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      <div className="space-y-3">
+        {values.map(([label, value]) => (
+          <section
+            key={label}
+            className="rounded-md border border-border bg-background p-3"
+          >
+            <h3 className="text-xs font-semibold text-muted-foreground">{label}</h3>
+            <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{value}</pre>
+          </section>
+        ))}
+      </div>
+      <div className="flex justify-end gap-2 border-t border-border pt-3">
+        <button
+          className="rounded-md border border-border px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+          type="button"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          type="button"
+          disabled={confirming}
+          onClick={() => void confirm()}
+        >
+          {confirming ? "Freezing..." : "Confirm freeze"}
+        </button>
+      </div>
+    </div>
   );
 }
 

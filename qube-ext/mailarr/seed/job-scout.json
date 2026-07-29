@@ -18,7 +18,8 @@
     "keywords": null,
     "scoreFloor": null,
     "enabled": false,
-    "frozen": false
+    "frozen": false,
+    "frozenAt": null
   },
   "sentHistory": [
     {
