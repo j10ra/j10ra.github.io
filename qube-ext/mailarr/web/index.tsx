@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronRight,
   Mail,
   Play,
   Plus,
+  RefreshCw,
   Save,
   Settings2,
   Trash2,
@@ -37,6 +40,7 @@ interface Routine {
   scoreFloor: number | null;
   enabled: boolean;
   lastRun: Run | null;
+  hasPendingRun: boolean;
   newLeads: number;
   sentToday: number;
 }
@@ -161,12 +165,27 @@ const mailarr: WebExtension = {
       icon: Mail,
       title: "Mailarr",
       scope: "session",
-      render: () => <MailarrPanel />,
+      render: (worktreeId) => <MailarrPanel worktreeId={worktreeId} />,
+    },
+  ],
+  editors: [
+    {
+      id: "pipeline",
+      icon: Mail,
+      render: (_worktreeId, payload) => {
+        const routineId = editorRoutineId(payload);
+
+        return routineId ? (
+          <PipelineEditor routineId={routineId} />
+        ) : (
+          <Notice tone="error">Invalid Mailarr pipeline payload.</Notice>
+        );
+      },
     },
   ],
 };
 
-function MailarrPanel() {
+function MailarrPanel({ worktreeId }: { worktreeId: number }) {
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [editing, setEditing] = useState<Routine | "new" | null>(null);
@@ -249,7 +268,14 @@ function MailarrPanel() {
                 : "border-border"
             }`}
           >
-            <button className="w-full text-left" onClick={() => setSelected(routine.id)}>
+            <button
+              className="w-full text-left"
+              onClick={() => {
+                if (!openPipelineEditor(worktreeId, routine)) {
+                  setSelected(routine.id);
+                }
+              }}
+            >
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">{routine.name}</span>
                 <span className="text-[11px] text-muted-foreground">{routine.cron}</span>
@@ -294,7 +320,12 @@ function MailarrPanel() {
                   icon={<Settings2 size={14} />}
                 />
                 <IconButton
-                  title="Run now"
+                  title={
+                    routine.hasPendingRun
+                      ? "A run is already pending for this routine"
+                      : "Run now"
+                  }
+                  disabled={routine.hasPendingRun}
                   onClick={() =>
                     void mutate(
                       `/api/mailarr/routines/${routine.id}/run`,
@@ -757,6 +788,275 @@ function RoutineDetail({
   );
 }
 
+function PipelineEditor({ routineId }: { routineId: number }) {
+  const [pipeline, setPipeline] = useState<Pipeline | null>(null);
+  const [stage, setStage] = useState<"all" | Stage>("all");
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async () => {
+    try {
+      const nextPipeline = await request<Pipeline>(
+        `/api/mailarr/routines/${routineId}/pipeline?stage=${stage}`,
+      );
+      setPipeline(nextPipeline);
+      setError(null);
+    } catch (nextError) {
+      setError(message(nextError));
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, [routineId, stage]);
+
+  if (error) {
+    return (
+      <div className="p-4">
+        <Notice tone="error">{error}</Notice>
+      </div>
+    );
+  }
+
+  if (!pipeline) {
+    return <p className="p-4 text-sm text-muted-foreground">Loading pipeline...</p>;
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-auto p-4 text-foreground">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">{pipeline.routine.name}</h2>
+            <span
+              className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${
+                pipeline.routine.enabled
+                  ? "border-emerald-500/50 text-emerald-500"
+                  : "border-border text-muted-foreground"
+              }`}
+            >
+              {pipeline.routine.enabled ? "enabled" : "disabled"}
+            </span>
+          </div>
+          <p className="mt-1 font-mono text-xs text-muted-foreground">
+            {pipeline.routine.cron}
+          </p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Daily send cap: {pipeline.routine.dailyCap}
+          </p>
+        </div>
+        <button
+          className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          type="button"
+          onClick={() => void load()}
+        >
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
+        <section className="rounded-md border border-border bg-background p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Latest briefing
+            </h3>
+            {pipeline.briefing && (
+              <span className="text-xs text-muted-foreground">
+                {new Date(pipeline.briefing.createdAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+          {pipeline.briefing ? (
+            <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed">
+              {pipeline.briefing.markdown}
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">
+              No briefing posted yet.
+            </p>
+          )}
+        </section>
+
+        <div className="grid gap-4">
+          <section className="rounded-md border border-border bg-background p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Agent binding
+            </h3>
+            {pipeline.routine.session ? (
+              <>
+                <p className="mt-3 text-sm font-medium">
+                  {pipeline.routine.sessionLabel ?? "Unlabelled agent"}
+                </p>
+                <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+                  {pipeline.routine.session}
+                </p>
+              </>
+            ) : (
+              <p className="mt-3 text-sm text-muted-foreground">
+                Any available agent may run this routine.
+              </p>
+            )}
+          </section>
+
+          <section className="rounded-md border border-border bg-background p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Sources
+            </h3>
+            {pipeline.sources.length === 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                No sources configured.
+              </p>
+            ) : (
+              <div className="mt-3 space-y-3">
+                {[...pipeline.sources]
+                  .sort(
+                    (left, right) =>
+                      SOURCE_STATUS_ORDER[left.status] -
+                        SOURCE_STATUS_ORDER[right.status] ||
+                      left.name.localeCompare(right.name),
+                  )
+                  .map((source) => (
+                    <div key={source.name} className="text-sm">
+                      <div className="flex items-center gap-2">
+                        <a
+                          className="min-w-0 flex-1 truncate font-medium underline"
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {source.name}
+                        </a>
+                        <span
+                          className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${SOURCE_STATUS_CLASS[source.status]}`}
+                        >
+                          {source.status}
+                        </span>
+                      </div>
+                      {source.notes && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {source.notes}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+
+      <div className="flex gap-1 overflow-x-auto">
+        {STAGES.map((entry) => (
+          <button
+            key={entry}
+            className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-3 py-1 text-xs ${
+              stage === entry
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border text-muted-foreground hover:text-foreground"
+            }`}
+            type="button"
+            onClick={() => setStage(entry)}
+          >
+            <span>{entry}</span>
+            <span className={stage === entry ? "opacity-80" : "opacity-60"}>
+              {pipeline.counts[entry]}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className="min-w-[760px] overflow-hidden rounded-md border border-border bg-background">
+        <div className="grid grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_120px] gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
+          <span />
+          <span>Company</span>
+          <span>Role</span>
+          <span>Rate</span>
+          <span>Stage</span>
+          <span>Source</span>
+        </div>
+        {pipeline.items.map((item) => (
+          <div key={item.id} className="border-t border-border">
+            <button
+              className="grid w-full grid-cols-[28px_1.1fr_1.4fr_0.8fr_0.7fr_120px] gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
+              type="button"
+              onClick={() => setExpanded(expanded === item.id ? null : item.id)}
+            >
+              {expanded === item.id ? (
+                <ChevronDown size={16} className="text-muted-foreground" />
+              ) : (
+                <ChevronRight size={16} className="text-muted-foreground" />
+              )}
+              <span className="truncate font-medium">{item.company}</span>
+              <span className="truncate">{item.role}</span>
+              <span className="truncate text-muted-foreground">
+                {item.rateInfo || "Not listed"}
+              </span>
+              <span className="text-muted-foreground">{item.stage}</span>
+              <span className="truncate text-muted-foreground">{item.source}</span>
+            </button>
+            {expanded === item.id && <PipelineItemDetail item={item} />}
+          </div>
+        ))}
+        {pipeline.items.length === 0 && (
+          <p className="border-t border-border p-6 text-center text-sm text-muted-foreground">
+            No items in this stage.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PipelineItemDetail({ item }: { item: Item }) {
+  return (
+    <div className="grid gap-4 border-t border-border bg-muted/15 px-10 py-4 text-sm md:grid-cols-2">
+      <PipelineField label="Score" value={String(item.score)} />
+      <PipelineField
+        label="Contact"
+        value={item.contactEmail ?? "No contact email"}
+      />
+      <PipelineField label="Fit notes" value={item.fitNotes ?? "None"} />
+      <PipelineField label="Drop reason" value={item.dropReason ?? "None"} />
+      <PipelineField
+        label="Draft pitch"
+        value={item.draftPitch ?? "None"}
+        wide
+      />
+      <PipelineField
+        label="Sent pitch"
+        value={item.sentPitch ?? "None"}
+        wide
+      />
+      <a
+        className="text-primary underline"
+        href={item.url}
+        target="_blank"
+        rel="noreferrer"
+      >
+        Open source posting
+      </a>
+    </div>
+  );
+}
+
+function PipelineField({
+  label,
+  value,
+  wide = false,
+}: {
+  label: string;
+  value: string;
+  wide?: boolean;
+}) {
+  return (
+    <div className={wide ? "md:col-span-2" : undefined}>
+      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
+      <p className="whitespace-pre-wrap">{value}</p>
+    </div>
+  );
+}
+
 function Header({ title, onBack }: { title: string; onBack: () => void }) {
   return (
     <div className="flex items-center gap-2">
@@ -805,15 +1105,18 @@ function IconButton({
   title,
   onClick,
   icon,
+  disabled = false,
 }: {
   title: string;
   onClick: () => void;
   icon: React.ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <button
-      className="rounded-md border border-border bg-background p-1.5 outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+      className="rounded-md border border-border bg-background p-1.5 outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background"
       onClick={onClick}
+      disabled={disabled}
       title={title}
     >
       {icon}
@@ -858,6 +1161,58 @@ async function mutate(
   } catch (error) {
     setError(message(error));
   }
+}
+
+export function openPipelineEditor(
+  worktreeId: number,
+  routine: Pick<Routine, "id" | "name">,
+): boolean {
+  if (typeof window === "undefined") return false;
+
+  const editorTabs = (
+    window as typeof window & {
+      __QUBE_SHARED__?: {
+        editorTabs?: {
+          open?: (
+            id: number,
+            spec: {
+              ext: string;
+              editor: string;
+              key: string;
+              title: string;
+              payload: unknown;
+            },
+          ) => void;
+        };
+      };
+    }
+  ).__QUBE_SHARED__?.editorTabs;
+
+  if (typeof editorTabs?.open !== "function") return false;
+
+  try {
+    editorTabs.open(worktreeId, {
+      ext: "mailarr",
+      editor: "pipeline",
+      key: `routine:${routine.id}`,
+      title: routine.name,
+      payload: { routineId: routine.id },
+    });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function editorRoutineId(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object" || !("routineId" in payload)) {
+    return null;
+  }
+
+  const routineId = Number((payload as { routineId: unknown }).routineId);
+
+  return Number.isInteger(routineId) && routineId > 0 ? routineId : null;
 }
 
 function message(error: unknown): string {
