@@ -6,6 +6,7 @@ import {
   Plus,
   Save,
   Settings2,
+  Trash2,
 } from "lucide-react";
 import { request, type WebExtension } from "@qube-code/extension-sdk/web";
 
@@ -77,8 +78,14 @@ interface RoutineForm {
   verbatimTerms: string;
   blockedTopics: string;
   requiredDisclosure: string;
-  keywords: string;
+  keywords: KeywordWeight[];
   scoreFloor: string;
+}
+
+interface KeywordWeight {
+  id: number;
+  term: string;
+  weight: string;
 }
 
 const EMPTY_FORM: RoutineForm = {
@@ -89,9 +96,11 @@ const EMPTY_FORM: RoutineForm = {
   verbatimTerms: "",
   blockedTopics: "",
   requiredDisclosure: "",
-  keywords: "",
+  keywords: [],
   scoreFloor: "",
 };
+const INPUT_CLASS =
+  "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50";
 const STAGES: Array<"all" | Stage> = [
   "all",
   "discovered",
@@ -213,6 +222,8 @@ function MailarrPanel() {
             <div className="mt-3 flex items-center justify-between border-t border-border pt-2">
               <label className="flex items-center gap-2 text-xs">
                 <input
+                  className="h-4 w-4 rounded border border-border bg-background outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  style={{ accentColor: "var(--primary)" }}
                   type="checkbox"
                   checked={routine.enabled}
                   onChange={(event) =>
@@ -273,20 +284,28 @@ function RoutineEditor({
           blockedTopics: routine.blockedTopics.join("\n"),
           requiredDisclosure: routine.requiredDisclosure ?? "",
           keywords: routine.keywords
-            ? JSON.stringify(routine.keywords, null, 2)
-            : "",
+            ? Object.entries(routine.keywords).map(([term, weight], id) => ({
+                id,
+                term,
+                weight: String(weight),
+              }))
+            : [],
           scoreFloor: routine.scoreFloor?.toString() ?? "",
         }
       : EMPTY_FORM,
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const hasKeywords = value.keywords.some(({ term }) => term.trim());
 
   const save = async () => {
     setSaving(true);
     try {
-      const keywords = value.keywords.trim()
-        ? (JSON.parse(value.keywords) as Record<string, number>)
+      const keywordEntries = value.keywords
+        .filter(({ term }) => term.trim())
+        .map(({ term, weight }) => [term, Number(weight)] as const);
+      const keywords = keywordEntries.length
+        ? Object.fromEntries(keywordEntries)
         : null;
       const body = {
         name: value.name,
@@ -321,92 +340,207 @@ function RoutineEditor({
   };
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-auto p-3 text-foreground">
+    <div className="flex h-full flex-col gap-2 overflow-auto p-3 text-foreground">
       <Header
         title={routine ? `Edit ${routine.name}` : "New routine"}
         onBack={onCancel}
       />
       {error && <Notice tone="error">{error}</Notice>}
-      <Field label="Name">
-        <input
-          className="input"
-          value={value.name}
-          onChange={(event) => setValue({ ...value, name: event.target.value })}
-        />
-      </Field>
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="Cron">
+      <FormSection title="Basics">
+        <Field label="Name">
           <input
-            className="input"
-            value={value.cron}
-            onChange={(event) => setValue({ ...value, cron: event.target.value })}
+            className={INPUT_CLASS}
+            value={value.name}
+            onChange={(event) => setValue({ ...value, name: event.target.value })}
           />
         </Field>
-        <Field label="Daily cap">
-          <input
-            className="input"
-            type="number"
-            min={1}
-            value={value.dailyCap}
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Cron">
+            <input
+              className={INPUT_CLASS}
+              value={value.cron}
+              onChange={(event) => setValue({ ...value, cron: event.target.value })}
+            />
+          </Field>
+          <Field label="Daily cap">
+            <input
+              className={INPUT_CLASS}
+              type="number"
+              min={1}
+              value={value.dailyCap}
+              onChange={(event) =>
+                setValue({ ...value, dailyCap: Number(event.target.value) })
+              }
+            />
+          </Field>
+        </div>
+      </FormSection>
+
+      <FormSection title="Order">
+        <Field label="Instructions">
+          <textarea
+            className={INPUT_CLASS}
+            rows={6}
+            value={value.orderText}
             onChange={(event) =>
-              setValue({ ...value, dailyCap: Number(event.target.value) })
+              setValue({ ...value, orderText: event.target.value })
             }
           />
         </Field>
-      </div>
-      <Field label="Order">
-        <textarea
-          className="input min-h-32"
-          value={value.orderText}
-          onChange={(event) => setValue({ ...value, orderText: event.target.value })}
-        />
-      </Field>
-      <Field label="Verbatim terms">
-        <textarea
-          className="input min-h-24"
-          value={value.verbatimTerms}
-          onChange={(event) =>
-            setValue({ ...value, verbatimTerms: event.target.value })
+      </FormSection>
+
+      <FormSection title="Guards">
+        <Field
+          label="Verbatim terms"
+          helper="inserted verbatim at {{TERMS}}; the only place digits are allowed"
+        >
+          <textarea
+            className={INPUT_CLASS}
+            rows={3}
+            value={value.verbatimTerms}
+            onChange={(event) =>
+              setValue({ ...value, verbatimTerms: event.target.value })
+            }
+          />
+        </Field>
+        <Field
+          label="Blocked topics"
+          helper="one per line; outreach containing a blocked topic is rejected"
+        >
+          <textarea
+            className={INPUT_CLASS}
+            rows={3}
+            value={value.blockedTopics}
+            onChange={(event) =>
+              setValue({ ...value, blockedTopics: event.target.value })
+            }
+          />
+        </Field>
+        <Field
+          label="Required disclosure"
+          helper="must appear exactly in every first-contact message"
+        >
+          <input
+            className={INPUT_CLASS}
+            value={value.requiredDisclosure}
+            onChange={(event) =>
+              setValue({ ...value, requiredDisclosure: event.target.value })
+            }
+          />
+        </Field>
+      </FormSection>
+
+      <FormSection title="Scoring">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-medium text-foreground">Keyword weights</p>
+          <button
+            className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            type="button"
+            onClick={() =>
+              setValue((current) => ({
+                ...current,
+                keywords: [
+                  ...current.keywords,
+                  {
+                    id:
+                      current.keywords.reduce(
+                        (highest, keyword) => Math.max(highest, keyword.id),
+                        -1,
+                      ) + 1,
+                    term: "",
+                    weight: "1",
+                  },
+                ],
+              }))
+            }
+          >
+            <Plus size={13} />
+            Add keyword
+          </button>
+        </div>
+        {value.keywords.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No keyword weights defined.
+          </p>
+        )}
+        {value.keywords.map((keyword) => (
+          <div key={keyword.id} className="flex items-end gap-2">
+            <Field label="Term">
+              <input
+                className={INPUT_CLASS}
+                value={keyword.term}
+                onChange={(event) =>
+                  setValue((current) => ({
+                    ...current,
+                    keywords: current.keywords.map((entry) =>
+                      entry.id === keyword.id
+                        ? { ...entry, term: event.target.value }
+                        : entry,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <div className="w-20 shrink-0">
+              <Field label="Weight">
+                <input
+                  className={INPUT_CLASS}
+                  type="number"
+                  step="any"
+                  value={keyword.weight}
+                  onChange={(event) =>
+                    setValue((current) => ({
+                      ...current,
+                      keywords: current.keywords.map((entry) =>
+                        entry.id === keyword.id
+                          ? { ...entry, weight: event.target.value }
+                          : entry,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+            <button
+              className="shrink-0 rounded-md border border-border bg-background p-2 text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              type="button"
+              title="Remove keyword"
+              onClick={() =>
+                setValue((current) => ({
+                  ...current,
+                  keywords: current.keywords.filter(
+                    (entry) => entry.id !== keyword.id,
+                  ),
+                }))
+              }
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        <Field
+          label="Score floor"
+          helper={
+            hasKeywords
+              ? "items scoring below this value are dropped"
+              : "add at least one keyword to enable the score floor"
           }
-        />
-      </Field>
-      <Field label="Blocked topics, one per line">
-        <textarea
-          className="input min-h-20"
-          value={value.blockedTopics}
-          onChange={(event) =>
-            setValue({ ...value, blockedTopics: event.target.value })
-          }
-        />
-      </Field>
-      <Field label="Required disclosure">
-        <textarea
-          className="input min-h-20"
-          value={value.requiredDisclosure}
-          onChange={(event) =>
-            setValue({ ...value, requiredDisclosure: event.target.value })
-          }
-        />
-      </Field>
-      <Field label="Keyword weights, JSON object">
-        <textarea
-          className="input min-h-24 font-mono"
-          placeholder='{"term": 2}'
-          value={value.keywords}
-          onChange={(event) => setValue({ ...value, keywords: event.target.value })}
-        />
-      </Field>
-      <Field label="Score floor">
-        <input
-          className="input"
-          type="number"
-          value={value.scoreFloor}
-          disabled={!value.keywords.trim()}
-          onChange={(event) => setValue({ ...value, scoreFloor: event.target.value })}
-        />
-      </Field>
+        >
+          <div className="w-24">
+            <input
+              className={INPUT_CLASS}
+              type="number"
+              value={value.scoreFloor}
+              disabled={!hasKeywords}
+              onChange={(event) =>
+                setValue({ ...value, scoreFloor: event.target.value })
+              }
+            />
+          </div>
+        </Field>
+      </FormSection>
       <button
-        className="flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-50"
+        className="flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
         onClick={() => void save()}
         disabled={saving}
       >
@@ -541,16 +675,36 @@ function Header({ title, onBack }: { title: string; onBack: () => void }) {
 
 function Field({
   label,
+  helper,
   children,
 }: {
   label: string;
+  helper?: string;
   children: React.ReactNode;
 }) {
   return (
-    <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-      {label}
+    <label className="flex min-w-0 flex-1 flex-col gap-1">
+      <span className="text-xs font-medium text-foreground">{label}</span>
       {children}
+      {helper && <span className="text-xs text-muted-foreground">{helper}</span>}
     </label>
+  );
+}
+
+function FormSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-3 rounded-md border border-border bg-background p-3">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </h3>
+      {children}
+    </section>
   );
 }
 
@@ -565,7 +719,7 @@ function IconButton({
 }) {
   return (
     <button
-      className="rounded-md border border-border p-1.5 hover:bg-muted"
+      className="rounded-md border border-border bg-background p-1.5 outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
       onClick={onClick}
       title={title}
     >
