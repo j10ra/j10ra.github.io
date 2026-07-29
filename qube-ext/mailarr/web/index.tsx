@@ -1222,7 +1222,7 @@ function RoutineWorkbench({
         </div>
       </div>
 
-      <div className="flex gap-1 overflow-x-auto">
+      <div style={{ flexShrink: 0 }} className="flex gap-1 overflow-x-auto">
         {STAGES.map((entry) => (
           <button
             key={entry}
@@ -1242,7 +1242,7 @@ function RoutineWorkbench({
         ))}
       </div>
 
-      <div className="overflow-x-auto rounded-md border border-border bg-background">
+      <div style={{ flexShrink: 0 }} className="overflow-x-auto rounded-md border border-border bg-background">
         <div style={ITEM_GRID} className="gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
           <span />
           <span>Company</span>
@@ -1286,7 +1286,7 @@ function RoutineWorkbench({
         )}
       </div>
 
-      <div className="grid gap-4">
+      <div style={{ flexShrink: 0 }} className="grid gap-4">
         <BriefingSection
           briefing={pipeline.briefing}
           expanded={briefingExpanded}
