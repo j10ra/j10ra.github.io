@@ -4,7 +4,7 @@
     "cron": "0 9 * * *",
     "orderText": "Refresh the routine sources with the source tools. Fetch each source and submit every candidate through items_add. Read each full description and qualify only senior React, TypeScript, or full-stack opportunities, preferring AI, agent, and MCP work. Apply the commercial floor defined in this order before qualifying. Draft one honest first-contact message for each qualified lead, include the required disclosure and {{TERMS}} exactly once, then send until the routine cap is reached. Post a briefing with intake, qualification, send, drop, and error details before finishing the run.",
     "dailyCap": 5,
-    "verbatimTerms": "[Configure the commercial terms for this routine before sending.]",
+    "verbatimTerms": "[Configure commercial terms here. Any digits needed in outreach, including a portfolio URL such as https://github.com/j10ra or availability numbers, must live inside verbatim_terms because this is the only block excluded from numeric validation.]",
     "blockedTopics": [
       "visa",
       "sponsorship",

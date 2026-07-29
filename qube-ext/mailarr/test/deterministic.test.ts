@@ -256,7 +256,7 @@ test("required disclosure is routine-owned and exact", () => {
   assert.equal(present.valid, true);
 });
 
-test("every digit is rejected outside verbatim terms", () => {
+test("every numeric character is rejected outside verbatim terms", () => {
   const termsOnly = validatePitch({
     pitch: `${BASE_ROUTINE.requiredDisclosure}\nHello.\n${BASE_ROUTINE.verbatimTerms}`,
     verbatimTerms: BASE_ROUTINE.verbatimTerms,
@@ -277,6 +277,11 @@ test("every digit is rejected outside verbatim terms", () => {
     "150 an hour",
     "150k a year",
     "daily fee is 1200",
+    "fullwidth １５０",
+    "Arabic-Indic ١٥٠",
+    "circled ⑧",
+    "Roman Ⅷ",
+    "fraction ½",
   ]) {
     const body = validatePitch({
       pitch: `${BASE_ROUTINE.requiredDisclosure}\n${claim}\n${BASE_ROUTINE.verbatimTerms}`,
@@ -288,7 +293,7 @@ test("every digit is rejected outside verbatim terms", () => {
 
     assert.equal(body.valid, false, `body accepted: ${claim}`);
     assert.equal(subject.valid, false, `subject accepted: ${claim}`);
-    assert.match(body.errors.join(" "), /must not include digits/);
+    assert.match(body.errors.join(" "), /must not include numeric characters/);
   }
 });
 

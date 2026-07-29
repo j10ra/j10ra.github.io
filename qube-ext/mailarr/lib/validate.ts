@@ -2,7 +2,7 @@ export const TERMS_TOKEN = "{{TERMS}}";
 
 const ATTRIBUTED_VALUE =
   /\b(posted|advertised|listed|stated|published)\s+(salary|rate|range|compensation|pay|fee|wage)\b/iu;
-const DIGIT = /\d/u;
+const NUMERIC_CHARACTER = /\p{N}/u;
 
 export interface MessageValidation {
   valid: boolean;
@@ -56,8 +56,10 @@ function guardedContentErrors(
     errors.push(`${label} must not characterize a numeric value as externally stated`);
   }
 
-  if (DIGIT.test(value)) {
-    errors.push(`${label} must not include digits outside the verbatim terms block`);
+  if (NUMERIC_CHARACTER.test(value)) {
+    errors.push(
+      `${label} must not include numeric characters outside the verbatim terms block`,
+    );
   }
 
   return errors;
