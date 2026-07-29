@@ -8,7 +8,9 @@ import type {
   RoutineSource,
   Run,
   RunStatus,
+  SourceStatus,
 } from "./model.js";
+import { SOURCE_STATUSES } from "./model.js";
 
 interface SeedData {
   routine: {
@@ -92,6 +94,7 @@ export function initializeSchema(db: DatabaseSync): void {
       name TEXT NOT NULL,
       url TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'candidate' CHECK (status IN ('candidate', 'verified', 'dead')),
       added_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (routine_id, name)
@@ -331,19 +334,26 @@ export function listSources(db: DatabaseSync, routineId: number): RoutineSource[
 
 export function addSource(
   db: DatabaseSync,
-  input: { routineId: number; name: string; url: string; notes?: string },
+  input: {
+    routineId: number;
+    name: string;
+    url: string;
+    notes?: string;
+    status?: SourceStatus;
+  },
 ): RoutineSource {
   getRoutine(db, input.routineId);
   const at = nowIso();
 
   db.prepare(`
-    INSERT INTO sources (routine_id, name, url, notes, added_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO sources (routine_id, name, url, notes, status, added_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.routineId,
     requiredText(input.name, "source name"),
     requiredText(input.url, "source url"),
     input.notes?.trim() ?? "",
+    sourceStatus(input.status ?? "candidate"),
     at,
     at,
   );
@@ -359,6 +369,7 @@ export function updateSource(
     newName?: string;
     url?: string;
     notes?: string;
+    status?: SourceStatus;
   },
 ): RoutineSource {
   const current = getSource(db, input.routineId, input.name);
@@ -366,11 +377,21 @@ export function updateSource(
     input.newName === undefined ? current.name : requiredText(input.newName, "source name");
   const nextUrl = input.url === undefined ? current.url : requiredText(input.url, "source url");
   const nextNotes = input.notes === undefined ? current.notes : input.notes.trim();
+  const nextStatus =
+    input.status === undefined ? current.status : sourceStatus(input.status);
   const result = db.prepare(`
     UPDATE sources
-    SET name = ?, url = ?, notes = ?, updated_at = ?
+    SET name = ?, url = ?, notes = ?, status = ?, updated_at = ?
     WHERE routine_id = ? AND name = ?
-  `).run(nextName, nextUrl, nextNotes, nowIso(), input.routineId, input.name);
+  `).run(
+    nextName,
+    nextUrl,
+    nextNotes,
+    nextStatus,
+    nowIso(),
+    input.routineId,
+    input.name,
+  );
 
   if (result.changes === 0) throw new Error(`source ${input.name} not found`);
 
@@ -861,9 +882,18 @@ function sourceFromRow(row: DbRow): RoutineSource {
     name: String(row.name),
     url: String(row.url),
     notes: String(row.notes),
+    status: sourceStatus(String(row.status)),
     addedAt: String(row.added_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function sourceStatus(value: string): SourceStatus {
+  if (!SOURCE_STATUSES.includes(value as SourceStatus)) {
+    throw new Error(`invalid source status: ${value}`);
+  }
+
+  return value as SourceStatus;
 }
 
 function runFromRow(row: DbRow): Run {
