@@ -66,6 +66,7 @@ export interface Item {
   fitNotes: string | null;
   draftPitch: string | null;
   sentPitch: string | null;
+  contactedDryRun: boolean;
   dropReason: string | null;
   payload: unknown;
   createdAt: string;

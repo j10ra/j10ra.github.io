@@ -197,18 +197,20 @@ test("send guards enforce the daily cap and permanent company dedupe", () => {
   db.close();
 });
 
-test("dry run records the complete email without delivering it", async () => {
+test("dry run consumes the cap and item while preserving next-day real contact", async () => {
   const db = testDatabase();
   const routine = createRoutine(db, {
     name: "Dry run",
     cron: "0 9 * * *",
     orderText: "Test dry run behavior",
-    dailyCap: 5,
+    dailyCap: 1,
   });
   const run = startRun(db, createRun(db, routine.id).id);
   const itemId = addQualifiedItem(db, routine.id, run.id, "Dry Co", "https://dry.test");
+  const firstDay = new Date(2026, 6, 28, 12);
+  const nextDay = new Date(2026, 6, 29, 12);
   let delivered = false;
-  const result = await sendFirstContact({
+  const request = {
     db,
     itemId,
     runId: run.id,
@@ -223,10 +225,12 @@ test("dry run records the complete email without delivering it", async () => {
     },
     smtp: { user: "", password: "", fromAddress: "" },
     dryRun: true,
+    now: firstDay,
     deliver: async () => {
       delivered = true;
     },
-  });
+  };
+  const result = await sendFirstContact(request);
   const row = db.prepare("SELECT body, dry_run FROM sent_log WHERE run_id = ?").get(run.id) as {
     body: string;
     dry_run: number;
@@ -236,34 +240,43 @@ test("dry run records the complete email without delivering it", async () => {
   assert.equal(result.dryRun, true);
   assert.equal(row.dry_run, 1);
   assert.match(row.body, /Commercial terms provided by Jetz/);
-  assert.equal(sentTodayCount(db, routine.id), 0);
+  assert.equal(sentTodayCount(db, routine.id, firstDay), 1);
   assert.equal(hasSentCompany(db, "Dry Co"), false);
-  assert.equal(getItem(db, itemId).stage, "qualified");
+  assert.equal(getItem(db, itemId).stage, "contacted");
+  assert.equal(getItem(db, itemId).contactedDryRun, true);
+  assert.equal(
+    (db.prepare("SELECT sent_count FROM runs WHERE id = ?").get(run.id) as { sent_count: number })
+      .sent_count,
+    1,
+  );
+  await assert.rejects(() => sendFirstContact(request), /Only qualified items can be contacted/);
 
-  await sendFirstContact({
+  const nextRun = startRun(db, createRun(db, routine.id).id);
+  const nextItemId = addQualifiedItem(
     db,
-    itemId,
-    runId: run.id,
-    to: "person@dry.test",
-    subject: "Senior TypeScript role",
-    draft: `${SEBE_DISCLOSURE}\nHello from Sebe.\n${COMMERCIAL_TERMS_TOKEN}`,
-    commercial: {
-      hourlyFloor: "TEST 10",
-      targetRate: "TEST 20",
-      premiumBand: "TEST 30 to TEST 40",
-      weeklyHours: "TEST 5",
-    },
-    smtp: { user: "", password: "", fromAddress: "" },
+    routine.id,
+    nextRun.id,
+    "Dry Co",
+    "https://dry-next-day.test",
+  );
+  assert.throws(
+    () => enforceSendGuards(db, { itemId: nextItemId, runId: nextRun.id, now: firstDay }),
+    /Daily cap of 1 reached/,
+  );
+  await sendFirstContact({
+    ...request,
+    itemId: nextItemId,
+    runId: nextRun.id,
+    now: nextDay,
+    to: "person@dry-next-day.test",
     dryRun: false,
-    deliver: async () => {
-      delivered = true;
-    },
   });
 
   assert.equal(delivered, true);
-  assert.equal(sentTodayCount(db, routine.id), 1);
+  assert.equal(sentTodayCount(db, routine.id, nextDay), 1);
   assert.equal(hasSentCompany(db, "Dry Co"), true);
-  assert.equal(getItem(db, itemId).stage, "contacted");
+  assert.equal(getItem(db, nextItemId).stage, "contacted");
+  assert.equal(getItem(db, nextItemId).contactedDryRun, false);
   assert.equal(
     Number(
       (
@@ -381,6 +394,20 @@ test("rediscovered uncontacted items move to the current run", () => {
   assert.doesNotThrow(() =>
     enforceSendGuards(db, { itemId: itemRow.id, runId: secondRun.id }),
   );
+
+  const otherRoutine = createRoutine(db, {
+    name: "Other rediscovery",
+    cron: "0 10 * * *",
+    orderText: "Test stable ownership",
+    dailyCap: 5,
+  });
+  const otherRun = startRun(db, createRun(db, otherRoutine.id).id);
+  assert.equal(
+    insertPosting(db, otherRoutine.id, otherRun.id, posting, 12, "new@rediscovered.test"),
+    "refreshed",
+  );
+  assert.equal(getItem(db, itemRow.id).routineId, routine.id);
+  assert.equal(getItem(db, itemRow.id).runId, secondRun.id);
   db.close();
 });
 

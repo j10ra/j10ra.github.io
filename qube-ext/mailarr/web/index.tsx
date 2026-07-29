@@ -57,6 +57,7 @@ interface Item {
   fitNotes: string | null;
   draftPitch: string | null;
   sentPitch: string | null;
+  contactedDryRun: boolean;
   dropReason: string | null;
   createdAt: string;
 }
@@ -492,7 +493,9 @@ function PipelineView({ routineId }: { routineId: number }) {
               <span className="truncate font-medium text-foreground">{item.company}</span>
               <span className="truncate text-foreground/90">{item.role}</span>
               <span className="truncate text-muted-foreground">{item.rateInfo || "Not listed"}</span>
-              <span className="capitalize text-muted-foreground">{item.stage}</span>
+              <span className="capitalize text-muted-foreground">
+                {item.contactedDryRun ? "Contacted (dry run)" : item.stage}
+              </span>
               <span className="truncate text-[10px] text-muted-foreground">
                 {item.source}
                 <br />
@@ -520,7 +523,11 @@ function ItemDetail({ item }: { item: Item }) {
       <Detail label="Fit notes" value={item.fitNotes ?? "None"} />
       <Detail label="Drop reason" value={item.dropReason ?? "None"} />
       <Detail label="Draft pitch" value={item.draftPitch ?? "None"} wide />
-      <Detail label="Sent pitch" value={item.sentPitch ?? "None"} wide />
+      <Detail
+        label={item.contactedDryRun ? "Dry-run pitch" : "Sent pitch"}
+        value={item.sentPitch ?? "None"}
+        wide
+      />
       <a
         className="text-blue-600 underline"
         href={item.url}

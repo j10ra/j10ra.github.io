@@ -107,8 +107,8 @@ export function migrate(db: DatabaseSync): void {
     );
 
   `);
-
-  migrateLegacySentLog(db);
+  if (version < 1) seedInitialData(db);
+  if (version < 2) migrateLegacySentLog(db);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
@@ -118,8 +118,6 @@ export function migrate(db: DatabaseSync): void {
       ON sent_log(normalized_company)
       WHERE dry_run = 0;
   `);
-
-  if (version < 1) seedInitialData(db);
 
   db.exec("PRAGMA user_version = 2");
 }
@@ -415,8 +413,7 @@ export function insertPosting(
   const refreshed = db
     .prepare(`
       UPDATE items
-      SET routine_id = ?,
-          run_id = ?,
+      SET run_id = CASE WHEN routine_id = ? THEN ? ELSE run_id END,
           company = ?,
           role = ?,
           rate_info = ?,
@@ -448,7 +445,20 @@ export function insertPosting(
 }
 
 export function getItem(db: DatabaseSync, id: number): Item {
-  const row = db.prepare("SELECT * FROM items WHERE id = ?").get(id) as DbRow | undefined;
+  const row = db
+    .prepare(`
+      SELECT items.*,
+        EXISTS (
+          SELECT 1
+          FROM sent_log
+          WHERE sent_log.run_id = items.run_id
+            AND sent_log.normalized_company = items.normalized_company
+            AND sent_log.dry_run = 1
+        ) AS contacted_dry_run
+      FROM items
+      WHERE items.id = ?
+    `)
+    .get(id) as DbRow | undefined;
 
   if (!row) throw new Error(`item ${id} not found`);
 
@@ -481,7 +491,15 @@ export function listItems(
   );
   const rows = db
     .prepare(`
-      SELECT * FROM items
+      SELECT items.*,
+        EXISTS (
+          SELECT 1
+          FROM sent_log
+          WHERE sent_log.run_id = items.run_id
+            AND sent_log.normalized_company = items.normalized_company
+            AND sent_log.dry_run = 1
+        ) AS contacted_dry_run
+      FROM items
       ${where}
       ORDER BY created_at DESC, id DESC
       LIMIT ? OFFSET ?
@@ -583,7 +601,7 @@ export function sentTodayCount(db: DatabaseSync, routineId: number, now = new Da
       SELECT COUNT(*) AS count
       FROM sent_log
       JOIN runs ON runs.id = sent_log.run_id
-      WHERE runs.routine_id = ? AND dry_run = 0 AND sent_at >= ? AND sent_at < ?
+      WHERE runs.routine_id = ? AND sent_at >= ? AND sent_at < ?
     `)
     .get(routineId, start.toISOString(), end.toISOString()) as DbRow;
 
@@ -629,21 +647,18 @@ export function recordSent(
     );
     db.prepare(`
       UPDATE items
-      SET stage = CASE WHEN ? = 1 THEN stage ELSE 'contacted' END,
+      SET stage = 'contacted',
           sent_pitch = ?,
           contact_email = ?,
           updated_at = ?
       WHERE id = ?
     `).run(
-      input.dryRun ? 1 : 0,
       input.body,
       input.email,
       input.sentAt,
       input.itemId,
     );
-    if (!input.dryRun) {
-      db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
-    }
+    db.prepare("UPDATE runs SET sent_count = sent_count + 1 WHERE id = ?").run(input.runId);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -747,6 +762,7 @@ function itemFromRow(row: DbRow): Item {
     fitNotes: row.fit_notes ? String(row.fit_notes) : null,
     draftPitch: row.draft_pitch ? String(row.draft_pitch) : null,
     sentPitch: row.sent_pitch ? String(row.sent_pitch) : null,
+    contactedDryRun: Boolean(row.contacted_dry_run),
     dropReason: row.drop_reason ? String(row.drop_reason) : null,
     payload: JSON.parse(String(row.payload_json)),
     createdAt: String(row.created_at),
