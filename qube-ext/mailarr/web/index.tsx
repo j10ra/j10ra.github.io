@@ -1226,7 +1226,8 @@ function RoutineWorkbench({
         {STAGES.map((entry) => (
           <button
             key={entry}
-            className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border px-3 py-1 text-xs ${
+            style={{ padding: "4px 12px", fontSize: 12, lineHeight: "18px" }}
+            className={`inline-flex flex-none items-center gap-1 whitespace-nowrap rounded-full border ${
               stage === entry
                 ? "border-primary bg-primary text-primary-foreground"
                 : "border-border text-muted-foreground hover:text-foreground"
