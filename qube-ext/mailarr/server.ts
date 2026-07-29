@@ -47,14 +47,14 @@ export default defineExtension({
           label: "Username",
           required: true,
           secret: true,
-          placeholder: "Stored securely at runtime",
+          placeholder: "Leave blank to keep any saved value",
         },
         {
           key: "smtp_password",
           label: "Password",
           required: true,
           secret: true,
-          placeholder: "Stored securely at runtime",
+          placeholder: "Leave blank to keep any saved value",
         },
         {
           key: "from_address",
