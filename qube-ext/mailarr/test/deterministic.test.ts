@@ -20,8 +20,10 @@ import {
   getRun,
   hasSentCompany,
   initializeSchema,
+  latestBriefing,
   listItems,
   listSources,
+  MANUAL_PANEL_BRIEFING_PREFIX,
   openMailarrDatabase,
   removeSource,
   routineDashboard,
@@ -983,6 +985,56 @@ test("deleteItem removes review drafts and protects ownership and audit history"
       /audit history/,
     );
     assert.equal(getItem(db, delivered.id).stage, "contacted");
+
+    const mixedDry = addQualifiedItem(
+      db,
+      firstRoutine.id,
+      run.id,
+      "Mixed Audit Company",
+      "mixed-audit-dry",
+    );
+    const mixedReal = addQualifiedItem(
+      db,
+      firstRoutine.id,
+      run.id,
+      "Mixed Audit Company",
+      "mixed-audit-real",
+    );
+
+    for (const item of [mixedDry, mixedReal]) {
+      updateItem(db, item.id, {
+        draftSubject: "Mixed audit subject",
+        draftPitch: validDraft(firstRoutine.requiredDisclosure),
+      });
+    }
+    await sendFirstContact({
+      db,
+      itemId: mixedDry.id,
+      runId: run.id,
+      draft: validDraft(firstRoutine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: true,
+    });
+    await sendFirstContact({
+      db,
+      itemId: mixedReal.id,
+      runId: run.id,
+      draft: validDraft(firstRoutine.requiredDisclosure),
+      smtp: smtp(),
+      dryRun: false,
+      deliver: async () => undefined,
+    });
+
+    assert.equal(getItem(db, mixedDry.id).contactedDryRun, true);
+    assert.equal(getItem(db, mixedReal.id).contactedDryRun, true);
+    assert.throws(
+      () => deleteItem(db, firstRoutine.id, mixedReal.id),
+      /audit history/,
+    );
+    assert.throws(
+      () => deleteItem(db, firstRoutine.id, mixedDry.id),
+      /audit history/,
+    );
   });
 });
 
@@ -1260,6 +1312,7 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
     const db = openMailarrDatabase(dataDir);
     let routineId = 0;
     let itemId = 0;
+    let sourceRunId = 0;
 
     try {
       const routine = createTestRoutine(db, { name: "Panel stored draft" });
@@ -1267,6 +1320,7 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
       routineId = routine.id;
       setRoutineFrozen(db, routine.id, true);
       const sourceRun = startRun(db, createRun(db, routine.id).id);
+      sourceRunId = sourceRun.id;
       const item = addQualifiedItem(
         db,
         routine.id,
@@ -1280,6 +1334,11 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
         draftSubject: "Stored panel subject",
         draftPitch: validDraft(routine.requiredDisclosure),
       });
+      saveBriefing(
+        db,
+        sourceRun.id,
+        "# Agent briefing\n\nOriginal agent summary.",
+      );
     } finally {
       db.close();
     }
@@ -1313,6 +1372,7 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
       const briefing = inspected
         .prepare("SELECT markdown_body FROM briefings WHERE run_id = ?")
         .get(response.run.id) as { markdown_body: string };
+      const routineBriefing = latestBriefing(inspected, routineId);
 
       assert.equal(item.stage, "contacted");
       assert.equal(item.runId, response.run.id);
@@ -1323,7 +1383,12 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
       assert.equal(sent.dry_run, 1);
       assert.equal(
         briefing.markdown_body,
-        `Manual panel send: Stored Panel Company (dry run) ${response.result.sentAt}`,
+        `${MANUAL_PANEL_BRIEFING_PREFIX} Manual panel send: Stored Panel Company (dry run) ${response.result.sentAt}`,
+      );
+      assert.equal(routineBriefing?.runId, sourceRunId);
+      assert.equal(
+        routineBriefing?.markdown,
+        "# Agent briefing\n\nOriginal agent summary.",
       );
     } finally {
       inspected.close();
@@ -1334,7 +1399,11 @@ test("panel send uses the stored reviewed draft and completes a manual dry-run",
 test("panel send failures finish manual runs with briefings", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const db = openMailarrDatabase(dataDir);
-    const targets: Array<{ routineId: number; itemId: number }> = [];
+    const targets: Array<{
+      routineId: number;
+      itemId: number;
+      runCountBefore: number;
+    }> = [];
 
     try {
       for (const [name, frozen, draft] of [
@@ -1359,7 +1428,15 @@ test("panel send failures finish manual runs with briefings", async () => {
             draftPitch: validDraft(routine.requiredDisclosure),
           });
         }
-        targets.push({ routineId: routine.id, itemId: item.id });
+        const runCount = db
+          .prepare("SELECT COUNT(*) AS count FROM runs WHERE routine_id = ?")
+          .get(routine.id) as { count: number };
+
+        targets.push({
+          routineId: routine.id,
+          itemId: item.id,
+          runCountBefore: Number(runCount.count),
+        });
       }
     } finally {
       db.close();
@@ -1381,6 +1458,9 @@ test("panel send failures finish manual runs with briefings", async () => {
 
       const inspected = openMailarrDatabase(dataDir);
       try {
+        const runCount = inspected
+          .prepare("SELECT COUNT(*) AS count FROM runs WHERE routine_id = ?")
+          .get(target.routineId) as { count: number };
         const run = inspected
           .prepare(
             "SELECT id, status, error_text FROM runs WHERE routine_id = ? ORDER BY id DESC LIMIT 1",
@@ -1388,15 +1468,37 @@ test("panel send failures finish manual runs with briefings", async () => {
           .get(target.routineId) as {
           id: number;
           status: string;
-          error_text: string;
+          error_text: string | null;
         };
+
+        if (index === 1) {
+          const briefingCount = inspected
+            .prepare(`
+              SELECT COUNT(*) AS count
+              FROM briefings
+              JOIN runs ON runs.id = briefings.run_id
+              WHERE runs.routine_id = ?
+            `)
+            .get(target.routineId) as { count: number };
+
+          assert.equal(Number(runCount.count), target.runCountBefore);
+          assert.equal(run.status, "running");
+          assert.equal(run.error_text, null);
+          assert.equal(Number(briefingCount.count), 0);
+          continue;
+        }
+
         const briefing = inspected
           .prepare("SELECT markdown_body FROM briefings WHERE run_id = ?")
           .get(run.id) as { markdown_body: string };
 
+        assert.equal(Number(runCount.count), target.runCountBefore + 1);
         assert.equal(run.status, "failed");
         assert.equal(run.error_text, response.body.error);
-        assert.match(briefing.markdown_body, /Manual panel send failed:/);
+        assert.match(
+          briefing.markdown_body,
+          /^\[mailarr:manual-panel-send\] Manual panel send failed:/,
+        );
         assert.match(briefing.markdown_body, new RegExp(response.body.error));
       } finally {
         inspected.close();

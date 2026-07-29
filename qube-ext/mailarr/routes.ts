@@ -14,6 +14,7 @@ import {
   latestBriefing,
   listItems,
   listSources,
+  MANUAL_PANEL_BRIEFING_PREFIX,
   openMailarrDatabase,
   pipelineCounts,
   routineDashboard,
@@ -195,6 +196,11 @@ export function registerMailarrRoutes(
             `item ${itemId} does not belong to routine ${routineId}`,
           );
         }
+        if (!getRoutine(db, routineId).frozen) {
+          throw new Error(
+            "routine is unlocked for editing; freeze it in the panel to enable sends",
+          );
+        }
 
         const run = startRun(db, createRun(db, routineId).id);
 
@@ -225,7 +231,7 @@ export function registerMailarrRoutes(
           saveBriefing(
             db,
             run.id,
-            `Manual panel send: ${item.company} (${
+            `${MANUAL_PANEL_BRIEFING_PREFIX} Manual panel send: ${item.company} (${
               result.dryRun ? "dry run" : "delivered"
             }) ${result.sentAt}`,
           );
@@ -240,7 +246,9 @@ export function registerMailarrRoutes(
           saveBriefing(
             db,
             run.id,
-            `Manual panel send failed: ${item.company} ${new Date().toISOString()}: ${errorText}`,
+            `${MANUAL_PANEL_BRIEFING_PREFIX} Manual panel send failed: ${
+              item.company
+            } ${new Date().toISOString()}: ${errorText}`,
           );
           finishRun(db, run.id, "failed", errorText);
           ctx.broadcast({ type: "mailarr-changed" });

@@ -36,6 +36,7 @@ const seedData = JSON.parse(
   readFileSync(new URL("../seed/job-scout.json", import.meta.url), "utf8"),
 ) as SeedData;
 const nowIso = () => new Date().toISOString();
+export const MANUAL_PANEL_BRIEFING_PREFIX = "[mailarr:manual-panel-send]";
 
 export function normalizeCompany(company: string): string {
   return company
@@ -803,7 +804,13 @@ export function deleteItem(
   if (item.routineId !== routineId) {
     throw new Error(`item ${itemId} does not belong to routine ${routineId}`);
   }
-  if ((item.sentPitch || item.sentSubject) && !item.contactedDryRun) {
+  const realSend = db.prepare(`
+    SELECT 1
+    FROM sent_log
+    WHERE run_id = ? AND normalized_company = ? AND dry_run = 0
+  `).get(item.runId, item.normalizedCompany);
+
+  if (realSend) {
     throw new Error(
       `item ${itemId} was delivered and must remain in audit history`,
     );
@@ -938,9 +945,10 @@ export function latestBriefing(
     FROM briefings
     JOIN runs ON runs.id = briefings.run_id
     WHERE runs.routine_id = ?
+      AND briefings.markdown_body NOT LIKE ?
     ORDER BY briefings.created_at DESC
     LIMIT 1
-  `).get(routineId) as DbRow | undefined;
+  `).get(routineId, `${MANUAL_PANEL_BRIEFING_PREFIX}%`) as DbRow | undefined;
 
   return row
     ? {
