@@ -4,6 +4,7 @@ import type {
   RouteRequest,
 } from "@qube-code/extension-sdk";
 import {
+  cancelPendingRuns,
   createRoutine,
   createRun,
   getRoutine,
@@ -15,6 +16,7 @@ import {
   routineDashboard,
   type RoutineInput,
   setRoutineEnabled,
+  setRoutineFrozen,
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
@@ -29,6 +31,14 @@ export function registerMailarrRoutes(
 ): void {
   app.get("/api/mailarr/routines", async (req, reply) =>
     useDb(req, reply, getCtx, (db) => ({ routines: routineDashboard(db) })),
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db) => ({
+        routine: getRoutine(db, positiveInt(req.params.id, "routine id")),
+      })),
   );
 
   app.post("/api/mailarr/routines", async (req, reply) =>
@@ -75,6 +85,36 @@ export function registerMailarrRoutes(
   );
 
   app.post<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/freeze",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const body = record(req.body);
+        const routineId = positiveInt(req.params.id, "routine id");
+        const frozen = boolean(body.frozen, "frozen");
+
+        if (frozen) {
+          const current = getRoutine(db, routineId);
+          const reviewedUpdatedAt = string(
+            body.reviewedUpdatedAt,
+            "reviewed updated time",
+          );
+
+          if (current.updatedAt !== reviewedUpdatedAt) {
+            throw new Error(
+              "routine content changed after review; review current values before freezing",
+            );
+          }
+        }
+
+        const routine = setRoutineFrozen(db, routineId, frozen);
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return { routine };
+      }),
+  );
+
+  app.post<{ Params: { id: string } }>(
     "/api/mailarr/routines/:id/run",
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
@@ -85,6 +125,23 @@ export function registerMailarrRoutes(
         ctx.broadcast({ type: "mailarr-changed" });
 
         return { run, delivery: "polling fallback" };
+      }),
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/cancel-pending",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const body = record(req.body);
+        const runs = cancelPendingRuns(
+          db,
+          positiveInt(req.params.id, "routine id"),
+          optionalBoolean(body.all, "all") ?? false,
+        );
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return { run: runs[0], runs, cancelled: runs.length };
       }),
   );
 
@@ -101,8 +158,14 @@ export function registerMailarrRoutes(
           pageSize: 500,
         }).items;
 
+        const routine = routineDashboard(db).find(
+          (entry) => entry.id === routineId,
+        );
+
+        if (!routine) throw new Error(`routine ${routineId} not found`);
+
         return {
-          routine: getRoutine(db, routineId),
+          routine,
           sources: listSources(db, routineId),
           counts: pipelineCounts(db, routineId),
           briefing: latestBriefing(db, routineId),
@@ -141,8 +204,7 @@ async function useDb<T>(
 function routineInput(value: unknown): RoutineInput {
   const body = record(value);
   const keywords = keywordMap(body.keywords);
-  const scoreFloor =
-    keywords === null ? null : nullableInteger(body.scoreFloor, "score floor");
+  const scoreFloor = nullableInteger(body.scoreFloor, "score floor");
 
   return {
     name: string(body.name, "name"),
@@ -194,6 +256,18 @@ function nullableInteger(value: unknown, field: string): number | null {
   if (!Number.isInteger(parsed)) throw new Error(`${field} must be an integer or null`);
 
   return parsed;
+}
+
+function boolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
+
+  return value;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+
+  return boolean(value, field);
 }
 
 function parseStage(value: unknown): ItemStage | undefined {

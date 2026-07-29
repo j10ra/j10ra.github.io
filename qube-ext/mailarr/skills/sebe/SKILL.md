@@ -31,3 +31,5 @@ When nudged, or while polling for work:
 10. Call `run_finish`.
 
 Mailarr replaces `{{TERMS}}` with the routine's `verbatim_terms` and applies its code-owned send guards. Items contacted while dry-run mode is active must be reset with `item_update` before a real send.
+
+If an order requires config changes, use `routine_update` while the routine is unlocked. Live sends and dry runs work only after the user freezes the routine in the panel. If either is refused while unlocked, stop and report the blocked lifecycle state instead of retrying. Never ask for or attempt changes to the cap, session, enabled state, or frozen state.

@@ -23,6 +23,7 @@ import {
   removeSource,
   routineDashboard,
   saveBriefing,
+  setRoutineFrozen,
   startRun,
   type RoutineInput,
   updateItem,
@@ -43,6 +44,7 @@ import { registerMailarrRoutes } from "../routes.js";
 import mailarr, {
   editorRoutineId,
   openPipelineEditor,
+  pendingAge,
   serializeKeywordWeights,
 } from "../web/index.js";
 
@@ -78,6 +80,8 @@ test("fresh schema is version 1 and seeds disabled routine data with permanent h
     assert.equal(version.user_version, 1);
     assert.equal(routines.length, 1);
     assert.equal(routines[0].enabled, 0);
+    assert.equal(routines[0].frozen, 0);
+    assert.equal(routines[0].frozen_at, null);
     assert.equal(routines[0].session, null);
     assert.equal(routines[0].session_label, null);
     assert.equal(routines[0].keywords, null);
@@ -343,12 +347,108 @@ test("routine dashboard reports whether a run is pending", () => {
       routineDashboard(db).find((entry) => entry.id === routine.id);
 
     assert.equal(dashboardRoutine()?.hasPendingRun, false);
+    assert.equal(dashboardRoutine()?.pendingRun, null);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 0);
     const run = createRun(db, routine.id);
 
     assert.equal(dashboardRoutine()?.hasPendingRun, true);
+    assert.equal(dashboardRoutine()?.pendingRun?.id, run.id);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 1);
     startRun(db, run.id);
     assert.equal(dashboardRoutine()?.hasPendingRun, false);
+    assert.equal(dashboardRoutine()?.pendingRun, null);
+    assert.equal(dashboardRoutine()?.pendingRunCount, 0);
   });
+});
+
+test("panel cancellation clears one pending run or the full stack", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const db = openMailarrDatabase(dataDir);
+    let routineId: number;
+    let runIds: number[];
+
+    try {
+      const routine = createTestRoutine(db);
+      routineId = routine.id;
+      runIds = [
+        createRun(db, routine.id).id,
+        createRun(db, routine.id).id,
+        createRun(db, routine.id).id,
+      ];
+    } finally {
+      db.close();
+    }
+
+    const response = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/cancel-pending",
+      {},
+      { id: String(routineId) },
+    )) as {
+      run: { id: number; status: string; errorText: string | null };
+      cancelled: number;
+    };
+
+    assert.equal(response.cancelled, 1);
+    assert.equal(response.run.id, runIds[0]);
+    assert.equal(response.run.status, "failed");
+    assert.equal(response.run.errorText, "cancelled from panel");
+
+    const reopened = openMailarrDatabase(dataDir);
+    try {
+      const dashboard = routineDashboard(reopened).find(
+        (routine) => routine.id === routineId,
+      );
+
+      assert.equal(dashboard?.pendingRun?.id, runIds[1]);
+      assert.equal(dashboard?.pendingRunCount, 2);
+    } finally {
+      reopened.close();
+    }
+
+    const allResponse = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/cancel-pending",
+      { all: true },
+      { id: String(routineId) },
+    )) as {
+      runs: Array<{ id: number; status: string; errorText: string | null }>;
+      cancelled: number;
+    };
+
+    assert.equal(allResponse.cancelled, 2);
+    assert.deepEqual(
+      allResponse.runs.map((run) => run.id),
+      runIds.slice(1),
+    );
+    assert.ok(
+      allResponse.runs.every(
+        (run) =>
+          run.status === "failed" && run.errorText === "cancelled from panel",
+      ),
+    );
+
+    const final = openMailarrDatabase(dataDir);
+    try {
+      const dashboard = routineDashboard(final).find(
+        (routine) => routine.id === routineId,
+      );
+
+      assert.equal(dashboard?.pendingRun, null);
+      assert.equal(dashboard?.pendingRunCount, 0);
+    } finally {
+      final.close();
+    }
+  });
+});
+
+test("pending age uses compact minute, hour, and day labels", () => {
+  const now = new Date("2030-01-03T12:00:00.000Z");
+
+  assert.equal(pendingAge("2030-01-03T11:59:45.000Z", now), "<1m");
+  assert.equal(pendingAge("2030-01-03T11:35:00.000Z", now), "25m");
+  assert.equal(pendingAge("2030-01-03T06:00:00.000Z", now), "6h");
+  assert.equal(pendingAge("2030-01-01T12:00:00.000Z", now), "2d");
 });
 
 test("pipeline editor opens only when the host API succeeds", () => {
@@ -529,72 +629,327 @@ test("every numeric character is rejected outside verbatim terms", () => {
   }
 });
 
-test("agent tool surface cannot mutate routine-owned guard data", async () => {
-  await withMailarrClient(async (client) => {
-    const tools = (await client.listTools()).tools;
-    const names = tools.map((tool) => tool.name);
-    const writableSchemas = tools
-      .filter((tool) => tool.name !== "routine_get")
-      .map((tool) => JSON.stringify(tool.inputSchema))
-      .join("\n");
+test("agent routine writes exclude panel-only fields and fail while frozen", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db);
+    setRoutineFrozen(db, routine.id, true);
 
-    assert.equal(names.includes("routine_update"), false);
-    for (const field of [
-      "verbatim_terms",
-      "blocked_topics",
-      "required_disclosure",
-      "daily_cap",
-      "keywords",
-      "score_floor",
-      "session",
-      "session_label",
-    ]) {
-      assert.doesNotMatch(writableSchemas, new RegExp(field));
-    }
+    await withMailarrClient(async (client) => {
+      const tools = (await client.listTools()).tools;
+      const routineUpdate = tools.find((tool) => tool.name === "routine_update");
+      const writableSchemas = tools
+        .filter((tool) => tool.name !== "routine_get")
+        .map((tool) => JSON.stringify(tool.inputSchema))
+        .join("\n");
 
-    const attemptedMutation = await client.callTool({
-      name: "routine_update",
-      arguments: {
-        routine_id: 1,
-        daily_cap: 999,
-        blocked_topics: [],
-        required_disclosure: null,
-        verbatim_terms: "Changed",
-      },
-    });
+      assert.ok(routineUpdate);
+      for (const field of [
+        "daily_cap",
+        "session",
+        "session_label",
+        "enabled",
+        "frozen",
+        "frozen_at",
+      ]) {
+        assert.doesNotMatch(writableSchemas, new RegExp(field));
+      }
+      for (const field of [
+        "order_text",
+        "verbatim_terms",
+        "blocked_topics",
+        "required_disclosure",
+        "keywords",
+        "score_floor",
+      ]) {
+        assert.match(JSON.stringify(routineUpdate.inputSchema), new RegExp(field));
+      }
 
-    assert.equal(attemptedMutation.isError, true);
-    assert.match(JSON.stringify(attemptedMutation), /not found|unknown/iu);
+      for (const change of [
+        { order_text: "Changed order" },
+        { verbatim_terms: "Changed terms" },
+        { blocked_topics: ["changed topic"] },
+        { required_disclosure: "Changed disclosure" },
+        { keywords: { react: 2 } },
+        { score_floor: 2 },
+      ]) {
+        const response = await client.callTool({
+          name: "routine_update",
+          arguments: { routine_id: routine.id, ...change },
+        });
+
+        assert.equal(response.isError, true);
+        assert.match(JSON.stringify(response), /routine is frozen/iu);
+      }
+    }, dataDir);
   });
 });
 
-test("an agent cannot disarm guards before sending", async () => {
-  await withDatabaseAsync(async (db) => {
-    const routine = createTestRoutine(db, {
-      blockedTopics: ["visa"],
-      requiredDisclosure: "Required disclosure.",
-    });
-    const run = startRun(db, createRun(db, routine.id).id);
-    const item = addQualifiedItem(db, routine.id, run.id, "Guarded Company", "guarded");
-    let deliveries = 0;
+test("freeze stamps review time and refreeze clears edited state", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const created = (await routes.call("POST", "/api/mailarr/routines", {
+      ...BASE_ROUTINE,
+      name: "Informed freeze routine",
+    })) as RoutineResponse;
+    const routineId = created.routine.id;
 
-    await assert.rejects(
-      sendFirstContact({
-        db,
-        itemId: item.id,
-        runId: run.id,
-        to: item.contactEmail ?? "",
-        subject: "Visa subject $400/hr",
-        draft: `A message at 150 per hour.\n${TERMS_TOKEN}`,
-        smtp: smtp(),
-        dryRun: false,
-        deliver: async () => {
-          deliveries += 1;
+    assert.equal(created.routine.frozenAt, null);
+    assert.equal(created.routine.editedSinceFreeze, true);
+
+    const firstFreeze = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: created.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(firstFreeze.routine.frozen, true);
+    assert.ok(firstFreeze.routine.frozenAt);
+    assert.equal(firstFreeze.routine.editedSinceFreeze, false);
+    assert.equal(firstFreeze.routine.updatedAt, firstFreeze.routine.frozenAt);
+
+    const unfrozen = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      { frozen: false },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(unfrozen.routine.frozen, false);
+    assert.equal(unfrozen.routine.frozenAt, firstFreeze.routine.frozenAt);
+    assert.equal(unfrozen.routine.editedSinceFreeze, true);
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "routine_update",
+        arguments: {
+          routine_id: routineId,
+          order_text: "Agent-edited after review.",
         },
-      }),
-      /required disclosure|blocked topic|digits/,
+      });
+
+      assert.equal(response.isError, undefined);
+    }, dataDir);
+
+    let editedUpdatedAt: string;
+    const editedDb = openMailarrDatabase(dataDir);
+    try {
+      const edited = getRoutine(editedDb, routineId);
+
+      editedUpdatedAt = edited.updatedAt;
+      assert.equal(edited.editedSinceFreeze, true);
+      assert.ok(edited.updatedAt > unfrozen.routine.updatedAt);
+      assert.ok(edited.updatedAt > (edited.frozenAt ?? ""));
+    } finally {
+      editedDb.close();
+    }
+
+    const currentReview = (await routes.call(
+      "GET",
+      "/api/mailarr/routines/:id",
+      undefined,
+      { id: String(routineId) },
+    )) as {
+      routine: {
+        orderText: string;
+        updatedAt: string;
+        editedSinceFreeze: boolean;
+      };
+    };
+
+    assert.equal(currentReview.routine.orderText, "Agent-edited after review.");
+    assert.equal(currentReview.routine.updatedAt, editedUpdatedAt);
+    assert.equal(currentReview.routine.editedSinceFreeze, true);
+
+    const staleConfirmation = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: unfrozen.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as { status: number; body: { error: string } };
+
+    assert.equal(staleConfirmation.status, 400);
+    assert.match(staleConfirmation.body.error, /review current values/);
+
+    const refrozen = (await routes.call(
+      "POST",
+      "/api/mailarr/routines/:id/freeze",
+      {
+        frozen: true,
+        reviewedUpdatedAt: currentReview.routine.updatedAt,
+      },
+      { id: String(routineId) },
+    )) as RoutineResponse;
+
+    assert.equal(refrozen.routine.frozen, true);
+    assert.ok(
+      (refrozen.routine.frozenAt ?? "") >
+        (firstFreeze.routine.frozenAt ?? ""),
     );
-    assert.equal(deliveries, 0);
+    assert.equal(refrozen.routine.updatedAt, refrozen.routine.frozenAt);
+    assert.equal(refrozen.routine.editedSinceFreeze, false);
+  });
+});
+
+test("routine_update reuses panel content validation", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db);
+
+    await withMailarrClient(async (client) => {
+      for (const [change, expected] of [
+        [{ order_text: "   " }, /routine order is required/iu],
+        [{ verbatim_terms: "   " }, /verbatim terms are required/iu],
+        [{ blocked_topics: [1] }, /string/iu],
+        [{ keywords: { " ": 2 } }, /non-empty terms/iu],
+        [{ score_floor: 2 }, /score floor requires keywords/iu],
+      ] as const) {
+        const response = await client.callTool({
+          name: "routine_update",
+          arguments: { routine_id: routine.id, ...change },
+        });
+
+        assert.equal(response.isError, true);
+        assert.match(JSON.stringify(response), expected);
+      }
+    }, dataDir);
+  });
+});
+
+test("unlock edit send fails, then panel freeze enforces current content guards", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const created = (await routes.call("POST", "/api/mailarr/routines", {
+      ...BASE_ROUTINE,
+      name: "Lifecycle routine",
+    })) as RoutineResponse;
+    const routineId = created.routine.id;
+
+    assert.equal(created.routine.frozen, false);
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "routine_update",
+        arguments: {
+          routine_id: routineId,
+          order_text: "  Current agent order.  ",
+          verbatim_terms: "Current commercial terms.",
+          blocked_topics: [" current-topic ", "current-topic"],
+          required_disclosure: "  Current disclosure.  ",
+          keywords: { " general ": 3 },
+          score_floor: 2,
+        },
+      });
+
+      assert.equal(response.isError, undefined);
+    }, dataDir);
+
+    const db = openMailarrDatabase(dataDir);
+    try {
+      const edited = getRoutine(db, routineId);
+
+      assert.equal(edited.orderText, "Current agent order.");
+      assert.equal(edited.verbatimTerms, "Current commercial terms.");
+      assert.deepEqual(edited.blockedTopics, ["current-topic"]);
+      assert.equal(edited.requiredDisclosure, "Current disclosure.");
+      assert.deepEqual(edited.keywords, { general: 3 });
+      assert.equal(edited.scoreFloor, 2);
+
+      const run = startRun(db, createRun(db, routineId).id);
+      const item = addQualifiedItem(
+        db,
+        routineId,
+        run.id,
+        "Current Guard Co",
+        "current",
+      );
+      let deliveries = 0;
+      const send = (subject: string, draft: string) =>
+        sendFirstContact({
+          db,
+          itemId: item.id,
+          runId: run.id,
+          to: item.contactEmail ?? "",
+          subject,
+          draft,
+          smtp: smtp(),
+          dryRun: false,
+          deliver: async () => {
+            deliveries += 1;
+          },
+        });
+
+      await assert.rejects(
+        send("Hello", `Current disclosure.\nHello.\n${TERMS_TOKEN}`),
+        /routine is unlocked for editing/,
+      );
+
+      const frozen = (await routes.call(
+        "POST",
+        "/api/mailarr/routines/:id/freeze",
+        {
+          frozen: true,
+          reviewedUpdatedAt: edited.updatedAt,
+        },
+        { id: String(routineId) },
+      )) as RoutineResponse;
+
+      assert.equal(frozen.routine.frozen, true);
+      await assert.rejects(
+        send("Hello 2", `Current disclosure.\nHello.\n${TERMS_TOKEN}`),
+        /numeric characters/,
+      );
+      await assert.rejects(
+        send("current-topic", `Current disclosure.\nHello.\n${TERMS_TOKEN}`),
+        /blocked topic/,
+      );
+      await assert.rejects(
+        send("Hello", `Hello.\n${TERMS_TOKEN}`),
+        /required disclosure/,
+      );
+
+      const result = await send(
+        "Hello",
+        `Current disclosure.\nHello.\n${TERMS_TOKEN}`,
+      );
+
+      assert.equal(deliveries, 1);
+      assert.match(result.body, /Current commercial terms\./);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("unlocked routines refuse sends even in dry-run mode", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db);
+    const run = startRun(db, createRun(db, routine.id).id);
+    const item = addQualifiedItem(
+      db,
+      routine.id,
+      run.id,
+      "Unlocked Company",
+      "dry",
+    );
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "send_first_contact",
+        arguments: {
+          run_id: run.id,
+          item_id: item.id,
+          subject: "Hello",
+          pitch: validDraft(routine.requiredDisclosure),
+        },
+      });
+
+      assert.equal(response.isError, true);
+      assert.match(JSON.stringify(response), /routine is unlocked for editing/iu);
+    }, dataDir);
   });
 });
 
@@ -613,6 +968,7 @@ test("verbatim terms replace the token exactly once", () => {
 test("dry runs count toward the cap without creating permanent dedupe", async () => {
   await withDatabaseAsync(async (db) => {
     const routine = createTestRoutine(db, { dailyCap: 1 });
+    setRoutineFrozen(db, routine.id, true);
     const run = startRun(db, createRun(db, routine.id).id);
     const item = addQualifiedItem(db, routine.id, run.id, "Dry Company", "dry");
     let deliveries = 0;
@@ -660,6 +1016,7 @@ test("dry runs count toward the cap without creating permanent dedupe", async ()
 test("real sends deliver once and permanently dedupe the company", async () => {
   await withDatabaseAsync(async (db) => {
     const routine = createTestRoutine(db);
+    setRoutineFrozen(db, routine.id, true);
     const run = startRun(db, createRun(db, routine.id).id);
     const first = addQualifiedItem(db, routine.id, run.id, "Permanent Company", "one");
     let deliveries = 0;
@@ -712,6 +1069,7 @@ test("real sends deliver once and permanently dedupe the company", async () => {
 test("send requires the recipient to match the stored contact", async () => {
   await withDatabaseAsync(async (db) => {
     const routine = createTestRoutine(db);
+    setRoutineFrozen(db, routine.id, true);
     const run = startRun(db, createRun(db, routine.id).id);
     const item = addQualifiedItem(db, routine.id, run.id, "Recipient Company", "one");
 
@@ -735,6 +1093,8 @@ test("send guards require a qualified item and matching routine", () => {
   withDatabase((db) => {
     const firstRoutine = createTestRoutine(db, { name: "First guard routine" });
     const secondRoutine = createTestRoutine(db, { name: "Second guard routine" });
+    setRoutineFrozen(db, firstRoutine.id, true);
+    setRoutineFrozen(db, secondRoutine.id, true);
     const firstRun = startRun(db, createRun(db, firstRoutine.id).id);
     const secondRun = startRun(db, createRun(db, secondRoutine.id).id);
     const summary = addItems(db, firstRoutine.id, firstRun.id, [
@@ -898,7 +1258,12 @@ async function withMailarrClient(
 ): Promise<void> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = mailarrMcpServer(() => {
-    if (dataDir) return { dataDir } as ExtensionContext;
+    if (dataDir) {
+      return {
+        dataDir,
+        broadcast: () => undefined,
+      } as unknown as ExtensionContext;
+    }
 
     throw new Error("test context is unavailable");
   });
@@ -921,6 +1286,10 @@ interface RoutineResponse {
     id: number;
     session: string | null;
     sessionLabel: string | null;
+    frozen: boolean;
+    frozenAt: string | null;
+    editedSinceFreeze: boolean;
+    updatedAt: string;
   };
 }
 
