@@ -26,6 +26,7 @@ interface SeedData {
     keywords: Record<string, number> | null;
     scoreFloor: number | null;
     enabled: boolean;
+    frozen: boolean;
   };
   sentHistory: Array<{ company: string; contactedAt: string }>;
 }
@@ -88,6 +89,7 @@ export function initializeSchema(db: DatabaseSync): void {
       keywords TEXT,
       score_floor INTEGER,
       enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+      frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1)),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       CHECK (keywords IS NOT NULL OR score_floor IS NULL)
@@ -184,8 +186,8 @@ function seedInitialData(db: DatabaseSync): void {
     INSERT INTO routines (
       name, cron, order_text, session, session_label, daily_cap,
       verbatim_terms, blocked_topics,
-      required_disclosure, keywords, score_floor, enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      required_disclosure, keywords, score_floor, enabled, frozen, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     routine.name,
     routine.cron,
@@ -199,6 +201,7 @@ function seedInitialData(db: DatabaseSync): void {
     serializeKeywords(routine.keywords),
     routine.scoreFloor,
     routine.enabled ? 1 : 0,
+    routine.frozen ? 1 : 0,
     seededAt,
     seededAt,
   );
@@ -226,6 +229,15 @@ export interface RoutineInput {
   requiredDisclosure: string | null;
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
+}
+
+export interface RoutineContentInput {
+  orderText?: string;
+  verbatimTerms?: string;
+  blockedTopics?: string[];
+  requiredDisclosure?: string | null;
+  keywords?: Record<string, number> | null;
+  scoreFloor?: number | null;
 }
 
 export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
@@ -257,6 +269,40 @@ export function updateRoutine(
   if (result.changes === 0) throw new Error(`routine ${id} not found`);
 
   return getRoutine(db, id);
+}
+
+export function updateRoutineContent(
+  db: DatabaseSync,
+  id: number,
+  input: RoutineContentInput,
+): Routine {
+  const current = getRoutine(db, id);
+
+  if (current.frozen) {
+    throw new Error("routine is frozen; unfreeze it in the panel to edit");
+  }
+
+  const keywords = input.keywords === undefined ? current.keywords : input.keywords;
+  let scoreFloor = input.keywords === null ? null : current.scoreFloor;
+
+  if (input.scoreFloor !== undefined) scoreFloor = input.scoreFloor;
+
+  return updateRoutine(db, id, {
+    name: current.name,
+    cron: current.cron,
+    orderText: input.orderText ?? current.orderText,
+    session: current.session,
+    sessionLabel: current.sessionLabel,
+    dailyCap: current.dailyCap,
+    verbatimTerms: input.verbatimTerms ?? current.verbatimTerms,
+    blockedTopics: input.blockedTopics ?? current.blockedTopics,
+    requiredDisclosure:
+      input.requiredDisclosure === undefined
+        ? current.requiredDisclosure
+        : input.requiredDisclosure,
+    keywords,
+    scoreFloor,
+  });
 }
 
 function routineValues(input: RoutineInput): Array<string | number | null> {
@@ -291,6 +337,9 @@ function validateRoutineInput(input: RoutineInput): void {
   ) {
     throw new Error("routine score floor must be an integer or null");
   }
+  if (input.keywords === null && input.scoreFloor !== null) {
+    throw new Error("routine score floor requires keywords");
+  }
   if (input.keywords) {
     for (const [term, weight] of Object.entries(input.keywords)) {
       if (!term.trim() || !Number.isFinite(weight)) {
@@ -308,6 +357,20 @@ export function setRoutineEnabled(
   const result = db
     .prepare("UPDATE routines SET enabled = ?, updated_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nowIso(), id);
+
+  if (result.changes === 0) throw new Error(`routine ${id} not found`);
+
+  return getRoutine(db, id);
+}
+
+export function setRoutineFrozen(
+  db: DatabaseSync,
+  id: number,
+  frozen: boolean,
+): Routine {
+  const result = db
+    .prepare("UPDATE routines SET frozen = ?, updated_at = ? WHERE id = ?")
+    .run(frozen ? 1 : 0, nowIso(), id);
 
   if (result.changes === 0) throw new Error(`routine ${id} not found`);
 
@@ -504,6 +567,36 @@ export function startRun(db: DatabaseSync, id: number): Run {
   }
 
   return getRun(db, id);
+}
+
+export function cancelPendingRun(db: DatabaseSync, routineId: number): Run {
+  getRoutine(db, routineId);
+  const pending = getPendingRun(db, routineId);
+
+  if (!pending) throw new Error(`routine ${routineId} has no pending run`);
+
+  const result = db.prepare(`
+    UPDATE runs
+    SET status = 'failed', finished_at = ?, error_text = 'cancelled from panel'
+    WHERE id = ? AND status = 'pending'
+  `).run(nowIso(), pending.id);
+
+  if (result.changes === 0) throw new Error(`run ${pending.id} is no longer pending`);
+
+  return getRun(db, pending.id);
+}
+
+export function getPendingRun(db: DatabaseSync, routineId: number): Run | null {
+  const row = db
+    .prepare(`
+      SELECT * FROM runs
+      WHERE routine_id = ? AND status = 'pending'
+      ORDER BY created_at, id
+      LIMIT 1
+    `)
+    .get(routineId) as DbRow | undefined;
+
+  return row ? runFromRow(row) : null;
 }
 
 export function finishRun(
@@ -834,6 +927,7 @@ export function routineDashboard(db: DatabaseSync): Array<
   Routine & {
     lastRun: Run | null;
     hasPendingRun: boolean;
+    pendingRun: Run | null;
     newLeads: number;
     sentToday: number;
   }
@@ -847,14 +941,13 @@ export function routineDashboard(db: DatabaseSync): Array<
       FROM items
       WHERE routine_id = ? AND stage IN ('discovered', 'qualified')
     `).get(routine.id) as DbRow;
-    const pendingRow = db
-      .prepare("SELECT 1 FROM runs WHERE routine_id = ? AND status = 'pending' LIMIT 1")
-      .get(routine.id);
+    const pendingRun = getPendingRun(db, routine.id);
 
     return {
       ...routine,
       lastRun: lastRow ? runFromRow(lastRow) : null,
-      hasPendingRun: Boolean(pendingRow),
+      hasPendingRun: Boolean(pendingRun),
+      pendingRun,
       newLeads: Number(leadRow.count),
       sentToday: sentTodayCount(db, routine.id),
     };
@@ -902,6 +995,7 @@ function routineFromRow(row: DbRow): Routine {
     keywords: parseKeywords(row.keywords),
     scoreFloor: row.score_floor === null ? null : Number(row.score_floor),
     enabled: Boolean(row.enabled),
+    frozen: Boolean(row.frozen),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };

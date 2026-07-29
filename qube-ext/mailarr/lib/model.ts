@@ -25,6 +25,7 @@ export interface Routine {
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
   enabled: boolean;
+  frozen: boolean;
   createdAt: string;
   updatedAt: string;
 }

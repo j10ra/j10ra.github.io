@@ -4,7 +4,6 @@ import { z } from "zod";
 import {
   addSource,
   finishRun,
-  getItem,
   getRoutine,
   listItems,
   listPendingRuns,
@@ -14,11 +13,12 @@ import {
   saveBriefing,
   startRun,
   updateItem,
+  updateRoutineContent,
   updateSource,
 } from "./lib/db.js";
 import { addItems } from "./lib/intake.js";
 import { ITEM_STAGES, SOURCE_STATUSES } from "./lib/model.js";
-import { sendFirstContact } from "./lib/send.js";
+import { requireFrozenRoutine, sendFirstContact } from "./lib/send.js";
 
 const text = (value: unknown) => ({
   content: [
@@ -48,6 +48,9 @@ export const MAILARR_INSTRUCTIONS = [
   "8. Call send_first_contact until the routine cap is reached.",
   "9. Call post_briefing, then run_finish.",
   "",
+  "Routine content can be updated only while unlocked. Sending requires the user to freeze",
+  "the routine in the panel.",
+  "",
   "The send tool is the only mail egress. It inserts routine-owned terms verbatim and enforces",
   "content validation, recipient matching, the daily cap, permanent company dedupe, and dry-run mode.",
 ].join("\n");
@@ -76,6 +79,45 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         ...getRoutine(db, routine_id),
         sources: listSources(db, routine_id),
       })),
+  );
+
+  server.registerTool(
+    "routine_update",
+    {
+      description:
+        "Edit a routine's six agent-authorable content fields while it is unlocked. Frozen routines refuse edits. Daily cap, session, session label, enabled state, and frozen state remain panel-only.",
+      inputSchema: {
+        routine_id: z.number().int().positive(),
+        order_text: z.string().optional(),
+        verbatim_terms: z.string().optional(),
+        blocked_topics: z.array(z.string()).optional(),
+        required_disclosure: z.string().nullable().optional(),
+        keywords: z.record(z.number()).nullable().optional(),
+        score_floor: z.number().int().nullable().optional(),
+      },
+    },
+    ({
+      routine_id,
+      order_text,
+      verbatim_terms,
+      blocked_topics,
+      required_disclosure,
+      keywords,
+      score_floor,
+    }) =>
+      withDb(
+        ctx,
+        (db) =>
+          updateRoutineContent(db, routine_id, {
+            orderText: order_text,
+            verbatimTerms: verbatim_terms,
+            blockedTopics: blocked_topics,
+            requiredDisclosure: required_disclosure,
+            keywords,
+            scoreFloor: score_floor,
+          }),
+        true,
+      ),
   );
 
   server.registerTool(
@@ -278,7 +320,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "send_first_contact",
     {
       description:
-        "The only mail egress. Requires a qualified item and a draft containing {{TERMS}} exactly once.",
+        "The only mail egress. Requires a frozen routine, a qualified item, and a draft containing {{TERMS}} exactly once.",
       inputSchema: {
         run_id: z.number().int().positive(),
         item_id: z.number().int().positive(),
@@ -292,7 +334,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         const current = ctx();
         const db = openMailarrDatabase(current.dataDir);
         try {
-          const item = getItem(db, item_id);
+          requireFrozenRoutine(db, run_id);
           const [smtpUser, smtpPassword] = await Promise.all([
             current.secrets.get("smtp_user"),
             current.secrets.get("smtp_password"),
@@ -301,7 +343,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
             db,
             runId: run_id,
             itemId: item_id,
-            to: to ?? item.contactEmail ?? "",
+            to,
             subject,
             draft: pitch,
             smtp: {

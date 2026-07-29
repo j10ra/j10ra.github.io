@@ -22,7 +22,7 @@ export interface SendRequest {
   db: DatabaseSync;
   itemId: number;
   runId: number;
-  to: string;
+  to?: string;
   subject: string;
   draft: string;
   smtp: SmtpSettings;
@@ -59,16 +59,16 @@ export function enforceSendGuards(
   db: DatabaseSync,
   input: { itemId: number; runId: number; now?: Date },
 ): void {
-  const item = getItem(db, input.itemId);
+  requireFrozenRoutine(db, input.runId);
   const run = getRun(db, input.runId);
-
+  const routine = getRoutine(db, run.routineId);
+  const item = getItem(db, input.itemId);
   if (item.routineId !== run.routineId) {
     throw new Error("Item and run do not belong to the same routine");
   }
   if (run.status !== "running") throw new Error("Send requires a running run");
   if (item.stage !== "qualified") throw new Error("Only qualified items can be contacted");
 
-  const routine = getRoutine(db, run.routineId);
   if (sentTodayCount(db, routine.id, input.now) >= routine.dailyCap) {
     throw new Error(`Daily cap of ${routine.dailyCap} reached for ${routine.name}`);
   }
@@ -77,7 +77,19 @@ export function enforceSendGuards(
   }
 }
 
+export function requireFrozenRoutine(db: DatabaseSync, runId: number): void {
+  const run = getRun(db, runId);
+  const routine = getRoutine(db, run.routineId);
+
+  if (!routine.frozen) {
+    throw new Error(
+      "routine is unlocked for editing; freeze it in the panel to enable sends",
+    );
+  }
+}
+
 export async function sendFirstContact(input: SendRequest): Promise<SendResult> {
+  requireFrozenRoutine(input.db, input.runId);
   let release: () => void = () => {};
   const previous = sendQueue;
   sendQueue = new Promise<void>((resolve) => {
@@ -89,7 +101,8 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     enforceSendGuards(input.db, input);
     const item = getItem(input.db, input.itemId);
     const routine = getRoutine(input.db, item.routineId);
-    const recipient = input.to.trim().toLowerCase();
+    const recipientAddress = input.to ?? item.contactEmail ?? "";
+    const recipient = recipientAddress.trim().toLowerCase();
     const itemRecipient = item.contactEmail?.trim().toLowerCase();
 
     if (!itemRecipient || recipient !== itemRecipient) {
@@ -117,7 +130,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     if (!input.dryRun) {
       await deliver({
         from: input.smtp.fromAddress,
-        to: input.to,
+        to: recipientAddress,
         subject: input.subject,
         text: body,
       });
@@ -126,7 +139,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     const sentAt = (input.now ?? new Date()).toISOString();
     recordSent(input.db, {
       company: item.company,
-      email: input.to,
+      email: recipientAddress,
       subject: input.subject,
       body,
       sentAt,

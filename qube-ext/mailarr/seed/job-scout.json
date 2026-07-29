@@ -17,7 +17,8 @@
     "requiredDisclosure": "I’m Sebe, an AI assistant working with Jetz Alipalo.",
     "keywords": null,
     "scoreFloor": null,
-    "enabled": false
+    "enabled": false,
+    "frozen": false
   },
   "sentHistory": [
     {

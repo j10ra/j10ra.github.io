@@ -4,6 +4,7 @@ import type {
   RouteRequest,
 } from "@qube-code/extension-sdk";
 import {
+  cancelPendingRun,
   createRoutine,
   createRun,
   getRoutine,
@@ -15,6 +16,7 @@ import {
   routineDashboard,
   type RoutineInput,
   setRoutineEnabled,
+  setRoutineFrozen,
   updateRoutine,
 } from "./lib/db.js";
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
@@ -75,6 +77,23 @@ export function registerMailarrRoutes(
   );
 
   app.post<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/freeze",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const body = record(req.body);
+        const routine = setRoutineFrozen(
+          db,
+          positiveInt(req.params.id, "routine id"),
+          boolean(body.frozen, "frozen"),
+        );
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return { routine };
+      }),
+  );
+
+  app.post<{ Params: { id: string } }>(
     "/api/mailarr/routines/:id/run",
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
@@ -85,6 +104,21 @@ export function registerMailarrRoutes(
         ctx.broadcast({ type: "mailarr-changed" });
 
         return { run, delivery: "polling fallback" };
+      }),
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/cancel-pending",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const run = cancelPendingRun(
+          db,
+          positiveInt(req.params.id, "routine id"),
+        );
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return { run };
       }),
   );
 
@@ -101,8 +135,14 @@ export function registerMailarrRoutes(
           pageSize: 500,
         }).items;
 
+        const routine = routineDashboard(db).find(
+          (entry) => entry.id === routineId,
+        );
+
+        if (!routine) throw new Error(`routine ${routineId} not found`);
+
         return {
-          routine: getRoutine(db, routineId),
+          routine,
           sources: listSources(db, routineId),
           counts: pipelineCounts(db, routineId),
           briefing: latestBriefing(db, routineId),
@@ -141,8 +181,7 @@ async function useDb<T>(
 function routineInput(value: unknown): RoutineInput {
   const body = record(value);
   const keywords = keywordMap(body.keywords);
-  const scoreFloor =
-    keywords === null ? null : nullableInteger(body.scoreFloor, "score floor");
+  const scoreFloor = nullableInteger(body.scoreFloor, "score floor");
 
   return {
     name: string(body.name, "name"),
@@ -194,6 +233,12 @@ function nullableInteger(value: unknown, field: string): number | null {
   if (!Number.isInteger(parsed)) throw new Error(`${field} must be an integer or null`);
 
   return parsed;
+}
+
+function boolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
+
+  return value;
 }
 
 function parseStage(value: unknown): ItemStage | undefined {

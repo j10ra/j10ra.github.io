@@ -10,6 +10,7 @@ import {
   Save,
   Settings2,
   Trash2,
+  XCircle,
 } from "lucide-react";
 import { request, type WebExtension } from "@qube-code/extension-sdk/web";
 
@@ -39,8 +40,10 @@ interface Routine {
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
   enabled: boolean;
+  frozen: boolean;
   lastRun: Run | null;
   hasPendingRun: boolean;
+  pendingRun: Run | null;
   newLeads: number;
   sentToday: number;
 }
@@ -155,6 +158,19 @@ export function serializeKeywordWeights(
   }
 
   return keywords.size ? Object.fromEntries(keywords) : null;
+}
+
+export function pendingAge(createdAt: string, now = new Date()): string {
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((now.getTime() - new Date(createdAt).getTime()) / 1_000),
+  );
+
+  if (elapsedSeconds < 60) return "<1m";
+  if (elapsedSeconds < 3_600) return `${Math.floor(elapsedSeconds / 60)}m`;
+  if (elapsedSeconds < 86_400) return `${Math.floor(elapsedSeconds / 3_600)}h`;
+
+  return `${Math.floor(elapsedSeconds / 86_400)}d`;
 }
 
 const mailarr: WebExtension = {
@@ -277,9 +293,19 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
               }}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-medium">{routine.name}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-sm font-medium">
+                    {routine.name}
+                  </span>
+                  <FreezeBadge frozen={routine.frozen} />
+                </span>
                 <span className="text-[11px] text-muted-foreground">{routine.cron}</span>
               </div>
+              {!routine.frozen && (
+                <p className="mt-2 text-xs text-amber-500">
+                  Sends are disabled while unlocked.
+                </p>
+              )}
               {routine.session ? (
                 <p className="mt-2 text-xs font-medium text-foreground">
                   agent: {routine.sessionLabel ?? "unlabelled"} ({routine.session})
@@ -295,24 +321,33 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                 <span>{routine.lastRun?.status ?? "not run"}</span>
               </div>
             </button>
-            <div className="mt-3 flex items-center justify-between border-t border-border pt-2">
-              <label className="flex items-center gap-2 text-xs">
-                <input
-                  className="h-4 w-4 rounded border border-border bg-background outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                  style={{ accentColor: "var(--primary)" }}
-                  type="checkbox"
+            <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
+              <div className="flex flex-wrap gap-3">
+                <Toggle
                   checked={routine.enabled}
-                  onChange={(event) =>
+                  label="Enabled"
+                  onChange={(enabled) =>
                     void mutate(
                       `/api/mailarr/routines/${routine.id}/toggle`,
-                      { enabled: event.target.checked },
+                      { enabled },
                       load,
                       setError,
                     )
                   }
                 />
-                Enabled
-              </label>
+                <Toggle
+                  checked={routine.frozen}
+                  label="Frozen"
+                  onChange={(frozen) =>
+                    void mutate(
+                      `/api/mailarr/routines/${routine.id}/freeze`,
+                      { frozen },
+                      load,
+                      setError,
+                    )
+                  }
+                />
+              </div>
               <div className="flex gap-1">
                 <IconButton
                   title="Edit"
@@ -336,6 +371,25 @@ function MailarrPanel({ worktreeId }: { worktreeId: number }) {
                   }
                   icon={<Play size={14} />}
                 />
+                {routine.pendingRun && (
+                  <>
+                    <span className="self-center text-[11px] text-muted-foreground">
+                      pending {pendingAge(routine.pendingRun.createdAt)}
+                    </span>
+                    <IconButton
+                      title="Cancel pending run"
+                      onClick={() =>
+                        void mutate(
+                          `/api/mailarr/routines/${routine.id}/cancel-pending`,
+                          {},
+                          load,
+                          setError,
+                        )
+                      }
+                      icon={<XCircle size={14} />}
+                    />
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -837,6 +891,7 @@ function PipelineEditor({ routineId }: { routineId: number }) {
             >
               {pipeline.routine.enabled ? "enabled" : "disabled"}
             </span>
+            <FreezeBadge frozen={pipeline.routine.frozen} />
           </div>
           <p className="mt-1 font-mono text-xs text-muted-foreground">
             {pipeline.routine.cron}
@@ -844,15 +899,65 @@ function PipelineEditor({ routineId }: { routineId: number }) {
           <p className="mt-2 text-sm text-muted-foreground">
             Daily send cap: {pipeline.routine.dailyCap}
           </p>
+          {!pipeline.routine.frozen && (
+            <p className="mt-2 text-sm text-amber-500">
+              Sends are disabled while this routine is unlocked.
+            </p>
+          )}
         </div>
-        <button
-          className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-          type="button"
-          onClick={() => void load()}
-        >
-          <RefreshCw size={15} />
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background"
+            type="button"
+            disabled={pipeline.routine.hasPendingRun}
+            title={
+              pipeline.routine.hasPendingRun
+                ? "A run is already pending for this routine"
+                : "Run now"
+            }
+            onClick={() =>
+              void mutate(
+                `/api/mailarr/routines/${pipeline.routine.id}/run`,
+                {},
+                load,
+                setError,
+              )
+            }
+          >
+            <Play size={15} />
+            Run now
+          </button>
+          {pipeline.routine.pendingRun && (
+            <>
+              <span className="text-xs text-muted-foreground">
+                pending {pendingAge(pipeline.routine.pendingRun.createdAt)}
+              </span>
+              <button
+                className="flex items-center gap-2 rounded-md border border-destructive/50 px-3 py-2 text-sm text-destructive outline-none hover:bg-destructive/10 focus-visible:ring-3 focus-visible:ring-ring/50"
+                type="button"
+                onClick={() =>
+                  void mutate(
+                    `/api/mailarr/routines/${pipeline.routine.id}/cancel-pending`,
+                    {},
+                    load,
+                    setError,
+                  )
+                }
+              >
+                <XCircle size={15} />
+                Cancel pending
+              </button>
+            </>
+          )}
+          <button
+            className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none hover:bg-muted focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            type="button"
+            onClick={() => void load()}
+          >
+            <RefreshCw size={15} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(260px,1fr)]">
@@ -1063,6 +1168,42 @@ function Header({ title, onBack }: { title: string; onBack: () => void }) {
       <IconButton title="Back" onClick={onBack} icon={<ArrowLeft size={15} />} />
       <h2 className="text-sm font-semibold">{title}</h2>
     </div>
+  );
+}
+
+function FreezeBadge({ frozen }: { frozen: boolean }) {
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+        frozen
+          ? "border-sky-500/50 text-sky-500"
+          : "border-amber-500/50 text-amber-500"
+      }`}
+    >
+      {frozen ? "frozen" : "unlocked"}
+    </span>
+  );
+}
+
+function Toggle({
+  checked,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs">
+      <input
+        className="h-4 w-4 rounded border border-border bg-background accent-primary outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      {label}
+    </label>
   );
 }
 
