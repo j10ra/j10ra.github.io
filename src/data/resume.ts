@@ -284,7 +284,8 @@ export const building: Project[] = [
   },
   {
     name: "mneme",
-    status: "Soon · open source",
+    status: "Live · open source",
+    href: "https://github.com/j10ra/mneme",
     blurb:
       "Cross-machine memory store for AI coding assistants. Pluggable LLM and embedder backends behind tiny interfaces, hybrid recall (semantic + keyword + recency), self-hosted on a private inference VM.",
     tags: [
