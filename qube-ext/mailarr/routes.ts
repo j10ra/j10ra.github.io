@@ -262,18 +262,23 @@ export function registerMailarrRoutes(
       }),
   );
 
-  app.get<{ Params: { id: string }; Querystring: { stage?: string } }>(
+  app.get<{
+    Params: { id: string };
+    Querystring: { stage?: string; page?: string; page_size?: string };
+  }>(
     "/api/mailarr/routines/:id/pipeline",
     async (req, reply) =>
       useDb(req, reply, getCtx, (db, ctx) => {
         const routineId = positiveInt(req.params.id, "routine id");
         const stage = parseStage(req.query.stage);
-        const items = listItems(db, {
+        const page = positiveInt(req.query.page ?? 1, "page");
+        const pageSize = pipelinePageSize(req.query.page_size);
+        const { items, total } = listItems(db, {
           routineId,
           stage,
-          page: 1,
-          pageSize: 500,
-        }).items;
+          page,
+          pageSize,
+        });
 
         const routine = routineDashboard(db).find(
           (entry) => entry.id === routineId,
@@ -288,6 +293,9 @@ export function registerMailarrRoutes(
           briefing: latestBriefing(db, routineId),
           dryRun: dryRunEnabled(ctx.config),
           items,
+          total,
+          page,
+          pageSize,
         };
       }),
   );
@@ -404,6 +412,17 @@ function parseStage(value: unknown): ItemStage | undefined {
   if (!ITEM_STAGES.includes(value as ItemStage)) throw new Error("invalid item stage");
 
   return value as ItemStage;
+}
+
+function pipelinePageSize(value: unknown): 5 | 10 | 20 {
+  if (value === undefined) return 10;
+  const parsed = Number(value);
+
+  if (parsed !== 5 && parsed !== 10 && parsed !== 20) {
+    throw new Error("page size must be 5, 10, or 20");
+  }
+
+  return parsed;
 }
 
 function record(value: unknown): Record<string, unknown> {
