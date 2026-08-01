@@ -54,6 +54,7 @@ import mailarr, {
   pendingAge,
   routineIdFromWorkbenchKey,
   serializeKeywordWeights,
+  showingRange,
   workbenchTarget,
 } from "../web/index.js";
 
@@ -119,7 +120,7 @@ test("manifest declares agent notification capability", () => {
     readFileSync(new URL("../extension.json", import.meta.url), "utf8"),
   ) as { version: string; capabilities: string[] };
 
-  assert.equal(manifest.version, "0.8.0");
+  assert.equal(manifest.version, "0.8.1");
   assert.ok(manifest.capabilities.includes("agent-notify"));
 });
 
@@ -620,6 +621,111 @@ test("panel cancellation clears one pending run or the full stack", async () => 
   });
 });
 
+test("panel pipeline paginates each stage and validates page inputs", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const db = openMailarrDatabase(dataDir);
+    let routineId: number;
+    let discoveredPageIds: number[];
+
+    try {
+      const routine = createTestRoutine(db);
+      routineId = routine.id;
+      const run = startRun(db, createRun(db, routine.id).id);
+      const items = Array.from({ length: 13 }, (_, index) =>
+        intake(
+          `Company ${index + 1}`,
+          `Role ${index + 1}`,
+          `https://example.test/pipeline-${index + 1}`,
+          "General details",
+        ),
+      );
+
+      addItems(db, routine.id, run.id, items);
+      const allItems = listItems(db, {
+        routineId: routine.id,
+        page: 1,
+        pageSize: 20,
+      }).items;
+
+      for (const item of allItems.slice(0, 3)) {
+        updateItem(db, item.id, { stage: "qualified" });
+      }
+
+      discoveredPageIds = listItems(db, {
+        routineId: routine.id,
+        stage: "discovered",
+        page: 2,
+        pageSize: 5,
+      }).items.map((item) => item.id);
+    } finally {
+      db.close();
+    }
+
+    const defaults = (await routes.call(
+      "GET",
+      "/api/mailarr/routines/:id/pipeline",
+      undefined,
+      { id: String(routineId) },
+    )) as {
+      items: Array<{ id: number }>;
+      total: number;
+      page: number;
+      pageSize: number;
+      counts: Record<string, number>;
+    };
+
+    assert.equal(defaults.page, 1);
+    assert.equal(defaults.pageSize, 10);
+    assert.equal(defaults.total, 13);
+    assert.equal(defaults.items.length, 10);
+    assert.equal(defaults.counts.all, 13);
+    assert.equal(defaults.counts.discovered, 10);
+    assert.equal(defaults.counts.qualified, 3);
+
+    const discoveredPage = (await routes.call(
+      "GET",
+      "/api/mailarr/routines/:id/pipeline",
+      undefined,
+      { id: String(routineId) },
+      { stage: "discovered", page: "2", page_size: "5" },
+    )) as {
+      items: Array<{ id: number }>;
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+
+    assert.equal(discoveredPage.total, 10);
+    assert.equal(discoveredPage.page, 2);
+    assert.equal(discoveredPage.pageSize, 5);
+    assert.deepEqual(
+      discoveredPage.items.map((item) => item.id),
+      discoveredPageIds,
+    );
+
+    const invalidQueries: Array<Record<string, string>> = [
+      { page_size: "15" },
+      { page_size: "0" },
+      { page_size: "-5" },
+      { page: "0" },
+      { page: "-1" },
+    ];
+
+    for (const query of invalidQueries) {
+      const rejected = (await routes.call(
+        "GET",
+        "/api/mailarr/routines/:id/pipeline",
+        undefined,
+        { id: String(routineId) },
+        query,
+      )) as { status: number; body: { error: string } };
+
+      assert.equal(rejected.status, 400);
+      assert.match(rejected.body.error, /page/u);
+    }
+  });
+});
+
 test("pending age uses compact minute, hour, and day labels", () => {
   const now = new Date("2030-01-03T12:00:00.000Z");
 
@@ -627,6 +733,12 @@ test("pending age uses compact minute, hour, and day labels", () => {
   assert.equal(pendingAge("2030-01-03T11:35:00.000Z", now), "25m");
   assert.equal(pendingAge("2030-01-03T06:00:00.000Z", now), "6h");
   assert.equal(pendingAge("2030-01-01T12:00:00.000Z", now), "2d");
+});
+
+test("showing range covers first, partial, and empty pages", () => {
+  assert.deepEqual(showingRange(1, 10, 23), { start: 1, end: 10 });
+  assert.deepEqual(showingRange(3, 10, 23), { start: 21, end: 23 });
+  assert.deepEqual(showingRange(1, 10, 0), { start: 0, end: 0 });
 });
 
 test("briefing summary strips markdown and stays on one compact line", () => {
@@ -2191,6 +2303,7 @@ async function withPanelRoutes(
         path: string,
         body?: unknown,
         params?: Record<string, string>,
+        query?: Record<string, string>,
       ) => Promise<unknown>;
     },
     dataDir: string,
@@ -2230,13 +2343,13 @@ async function withPanelRoutes(
   try {
     await action(
       {
-        call: async (method, path, body, params = {}) => {
+        call: async (method, path, body, params = {}, query = {}) => {
           const handler = handlers.get(`${method} ${path}`);
 
           assert.ok(handler, `route not registered: ${method} ${path}`);
 
           return handler(
-            { body, params, query: {} },
+            { body, params, query },
             {
               code: (status) => ({
                 send: (responseBody) => ({ status, body: responseBody }),

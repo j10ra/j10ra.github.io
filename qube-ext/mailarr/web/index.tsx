@@ -16,6 +16,7 @@ import { request, type WebExtension } from "@qube-code/extension-sdk/web";
 
 type Stage = "discovered" | "qualified" | "contacted" | "replied" | "dropped";
 type SourceStatus = "candidate" | "verified" | "dead";
+type PageSize = 5 | 10 | 20;
 
 interface Run {
   id: number;
@@ -88,6 +89,9 @@ interface Pipeline {
   briefing: { markdown: string; createdAt: string } | null;
   dryRun: boolean;
   items: Item[];
+  total: number;
+  page: number;
+  pageSize: PageSize;
 }
 
 interface RoutineForm {
@@ -119,6 +123,8 @@ interface StoredFormDraft {
 
 interface WorkbenchViewState {
   stage: "all" | Stage;
+  page: number;
+  pageSize: PageSize;
   expandedItemId: number | null;
   briefingExpanded: boolean;
   reviewingFreeze: boolean;
@@ -226,6 +232,8 @@ function workbenchStateKey(target: WorkbenchTarget): string {
 function defaultWorkbenchState(target: WorkbenchTarget): WorkbenchViewState {
   return {
     stage: "all",
+    page: 1,
+    pageSize: 10,
     expandedItemId: null,
     briefingExpanded: false,
     reviewingFreeze: false,
@@ -269,6 +277,19 @@ export function pendingAge(createdAt: string, now = new Date()): string {
   if (elapsedSeconds < 86_400) return `${Math.floor(elapsedSeconds / 3_600)}h`;
 
   return `${Math.floor(elapsedSeconds / 86_400)}d`;
+}
+
+export function showingRange(
+  page: number,
+  pageSize: number,
+  total: number,
+): { start: number; end: number } {
+  if (total === 0) return { start: 0, end: 0 };
+
+  return {
+    start: Math.min((page - 1) * pageSize + 1, total),
+    end: Math.min(page * pageSize, total),
+  };
 }
 
 export function briefingSummary(markdown: string, limit = 120): string {
@@ -933,6 +954,8 @@ function RoutineWorkbench({
   );
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
   const [stage, setStage] = useState<"all" | Stage>(restored.stage);
+  const [page, setPage] = useState(restored.page);
+  const [pageSize, setPageSize] = useState<PageSize>(restored.pageSize);
   const [expanded, setExpanded] = useState<number | null>(
     restored.expandedItemId,
   );
@@ -966,7 +989,17 @@ function RoutineWorkbench({
   const currentTarget = (): WorkbenchTarget => routineId ?? "new";
   const rememberStage = (nextStage: "all" | Stage) => {
     setStage(nextStage);
-    rememberWorkbench(currentTarget(), { stage: nextStage });
+    setPage(1);
+    rememberWorkbench(currentTarget(), { stage: nextStage, page: 1 });
+  };
+  const rememberPage = (nextPage: number) => {
+    setPage(nextPage);
+    rememberWorkbench(currentTarget(), { page: nextPage });
+  };
+  const rememberPageSize = (nextPageSize: PageSize) => {
+    setPageSize(nextPageSize);
+    setPage(1);
+    rememberWorkbench(currentTarget(), { pageSize: nextPageSize, page: 1 });
   };
   const rememberExpanded = (itemId: number | null) => {
     setExpanded(itemId);
@@ -990,9 +1023,25 @@ function RoutineWorkbench({
 
     try {
       const nextPipeline = await request<Pipeline>(
-        `/api/mailarr/routines/${routineId}/pipeline?stage=${stage}`,
+        `/api/mailarr/routines/${routineId}/pipeline?stage=${stage}&page=${page}&page_size=${pageSize}`,
       );
+      const pageCount = Math.max(
+        1,
+        Math.ceil(nextPipeline.total / nextPipeline.pageSize),
+      );
+
+      if (nextPipeline.page > pageCount) {
+        rememberPage(pageCount);
+        return;
+      }
+
       setPipeline(nextPipeline);
+      if (
+        expanded !== null &&
+        !nextPipeline.items.some((item) => item.id === expanded)
+      ) {
+        rememberExpanded(null);
+      }
       setError(null);
     } catch (nextError) {
       setError(message(nextError));
@@ -1045,7 +1094,7 @@ function RoutineWorkbench({
 
   useEffect(() => {
     void load();
-  }, [routineId, stage]);
+  }, [routineId, stage, page, pageSize]);
 
   if (routineId === null) {
     return (
@@ -1296,57 +1345,68 @@ function RoutineWorkbench({
         ))}
       </div>
 
-      <div style={{ flexShrink: 0 }} className="overflow-x-auto rounded-md border border-border bg-background">
-        <div style={ITEM_GRID} className="gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
-          <span />
-          <span>Company</span>
-          <span>Role</span>
-          <span>Rate</span>
-          <span>Stage</span>
-          <span>Email</span>
-          <span>Source</span>
-        </div>
-        {pipeline.items.map((item) => (
-          <div key={item.id} className="border-t border-border">
-            <button
-              style={ITEM_GRID}
-              className="w-full gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
-              type="button"
-              onClick={() =>
-                rememberExpanded(expanded === item.id ? null : item.id)
-              }
-            >
-              {expanded === item.id ? (
-                <ChevronDown size={16} className="text-muted-foreground" />
-              ) : (
-                <ChevronRight size={16} className="text-muted-foreground" />
-              )}
-              <span className="truncate font-medium">{item.company}</span>
-              <span className="truncate">{item.role}</span>
-              <span className="truncate text-muted-foreground">
-                {item.rateInfo || "Not listed"}
-              </span>
-              <span className="text-muted-foreground">{item.stage}</span>
-              <EmailStateBadge item={item} />
-              <span className="truncate text-muted-foreground">{item.source}</span>
-            </button>
-            {expanded === item.id && (
-              <PipelineItemDetail
-                item={item}
-                routineId={pipeline.routine.id}
-                dryRun={pipeline.dryRun}
-                onChanged={async () => {
-                  rememberExpanded(null);
-                  await load();
-                }}
-              />
-            )}
+      <div style={{ flexShrink: 0 }} className="rounded-md border border-border bg-background">
+        <div className="overflow-x-auto">
+          <div style={ITEM_GRID} className="gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground">
+            <span />
+            <span>Company</span>
+            <span>Role</span>
+            <span>Rate</span>
+            <span>Stage</span>
+            <span>Email</span>
+            <span>Source</span>
           </div>
-        ))}
-        {pipeline.items.length === 0 && (
-          <p className="border-t border-border p-6 text-center text-sm text-muted-foreground">
-            No items in this stage.
-          </p>
+          {pipeline.items.map((item) => (
+            <div key={item.id} className="border-t border-border">
+              <button
+                style={ITEM_GRID}
+                className="w-full gap-3 px-3 py-3 text-left text-sm outline-none hover:bg-muted/30 focus-visible:bg-muted/30"
+                type="button"
+                onClick={() =>
+                  rememberExpanded(expanded === item.id ? null : item.id)
+                }
+              >
+                {expanded === item.id ? (
+                  <ChevronDown size={16} className="text-muted-foreground" />
+                ) : (
+                  <ChevronRight size={16} className="text-muted-foreground" />
+                )}
+                <span className="truncate font-medium">{item.company}</span>
+                <span className="truncate">{item.role}</span>
+                <span className="truncate text-muted-foreground">
+                  {item.rateInfo || "Not listed"}
+                </span>
+                <span className="text-muted-foreground">{item.stage}</span>
+                <EmailStateBadge item={item} />
+                <span className="truncate text-muted-foreground">{item.source}</span>
+              </button>
+              {expanded === item.id && (
+                <PipelineItemDetail
+                  item={item}
+                  routineId={pipeline.routine.id}
+                  dryRun={pipeline.dryRun}
+                  onChanged={async () => {
+                    rememberExpanded(null);
+                    await load();
+                  }}
+                />
+              )}
+            </div>
+          ))}
+          {pipeline.items.length === 0 && (
+            <p className="border-t border-border p-6 text-center text-sm text-muted-foreground">
+              No items in this stage.
+            </p>
+          )}
+        </div>
+        {pipeline.total > 0 && (
+          <PipelinePager
+            page={pipeline.page}
+            pageSize={pipeline.pageSize}
+            total={pipeline.total}
+            onPageChange={rememberPage}
+            onPageSizeChange={rememberPageSize}
+          />
         )}
       </div>
 
@@ -1426,6 +1486,78 @@ function RoutineWorkbench({
             )}
           </section>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PipelinePager({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number;
+  pageSize: PageSize;
+  total: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (pageSize: PageSize) => void;
+}) {
+  const range = showingRange(page, pageSize, total);
+  const lastPage = Math.max(1, Math.ceil(total / pageSize));
+  const controlStyle: React.CSSProperties = {
+    height: 30,
+    flexShrink: 0,
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 8,
+        padding: "8px 12px",
+      }}
+      className="border-t border-border text-xs text-muted-foreground"
+    >
+      <span>
+        Showing {range.start} to {range.end} of {total}
+      </span>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button
+          style={controlStyle}
+          className="rounded-md border border-border bg-background px-2 text-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background"
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          Prev
+        </button>
+        <button
+          style={controlStyle}
+          className="rounded-md border border-border bg-background px-2 text-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-background"
+          type="button"
+          disabled={page >= lastPage}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </button>
+        <select
+          style={{ ...controlStyle, width: 58 }}
+          className="rounded-md border border-border bg-background px-2 text-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          aria-label="Items per page"
+          value={pageSize}
+          onChange={(event) =>
+            onPageSizeChange(Number(event.target.value) as PageSize)
+          }
+        >
+          <option value={5}>5</option>
+          <option value={10}>10</option>
+          <option value={20}>20</option>
+        </select>
       </div>
     </div>
   );
