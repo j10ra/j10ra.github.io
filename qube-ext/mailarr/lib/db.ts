@@ -34,6 +34,11 @@ interface SeedData {
   sentHistory: Array<{ company: string; contactedAt: string }>;
 }
 
+interface SchemaSeedOptions {
+  seedData?: SeedData;
+  afterRoutineInsert?: (db: DatabaseSync, routineId: number) => void;
+}
+
 const seedData = JSON.parse(
   readFileSync(new URL("../seed/job-scout.json", import.meta.url), "utf8"),
 ) as SeedData;
@@ -60,7 +65,10 @@ export function openMailarrDatabase(dataDir: string): DatabaseSync {
   return db;
 }
 
-export function initializeSchema(db: DatabaseSync): void {
+export function initializeSchema(
+  db: DatabaseSync,
+  seedOptions: SchemaSeedOptions = {},
+): void {
   try {
     db.exec("BEGIN IMMEDIATE");
     const version = Number(
@@ -178,7 +186,7 @@ export function initializeSchema(db: DatabaseSync): void {
       ON sent_log(normalized_company)
       WHERE dry_run = 0;
     `);
-    seedInitialData(db);
+    seedInitialData(db, seedOptions);
     db.exec("PRAGMA user_version = 4; COMMIT");
   } catch (error) {
     if (db.isTransaction) db.exec("ROLLBACK");
@@ -186,11 +194,15 @@ export function initializeSchema(db: DatabaseSync): void {
   }
 }
 
-function seedInitialData(db: DatabaseSync): void {
+function seedInitialData(
+  db: DatabaseSync,
+  options: SchemaSeedOptions,
+): void {
   const seededAt = "2026-07-28T00:00:00.000Z";
-  const routine = seedData.routine;
+  const data = options.seedData ?? seedData;
+  const routine = data.routine;
 
-  db.prepare(`
+  const result = db.prepare(`
     INSERT INTO routines (
       name, cron, order_text, session, session_label, worktree_id, daily_cap,
       verbatim_terms, blocked_topics,
@@ -210,13 +222,17 @@ function seedInitialData(db: DatabaseSync): void {
     routine.requiredDisclosure,
     serializeKeywords(routine.keywords),
     routine.scoreFloor,
-    routine.dryRun ? 1 : 0,
-    routine.enabled ? 1 : 0,
-    routine.frozen ? 1 : 0,
+    // Seed files describe content only. Fresh routines always start dry, disabled, and unlocked.
+    1,
+    0,
+    0,
     routine.frozenAt,
     seededAt,
     seededAt,
   );
+
+  const routineId = Number(result.lastInsertRowid);
+  options.afterRoutineInsert?.(db, routineId);
 
   const insertHistory = db.prepare(`
     INSERT INTO sent_log
@@ -224,8 +240,24 @@ function seedInitialData(db: DatabaseSync): void {
     VALUES (?, ?, '', 'Imported contact record', '', ?, NULL, 0)
   `);
 
-  for (const entry of seedData.sentHistory) {
+  for (const entry of data.sentHistory) {
     insertHistory.run(entry.company, normalizeCompany(entry.company), entry.contactedAt);
+  }
+
+  const seededRoutine = db
+    .prepare("SELECT dry_run, enabled, frozen FROM routines WHERE id = ?")
+    .get(routineId) as
+    | { dry_run: number; enabled: number; frozen: number }
+    | undefined;
+
+  if (
+    seededRoutine?.dry_run !== 1 ||
+    seededRoutine.enabled !== 0 ||
+    seededRoutine.frozen !== 0
+  ) {
+    throw new Error(
+      "Mailarr seed safety assertion failed: routine must be dry, disabled, and unlocked",
+    );
   }
 }
 
