@@ -128,12 +128,70 @@ test("fresh schema is version 4 and seeds a disabled dry-run routine with perman
   });
 });
 
+test("fresh schema ignores armed routine state in seed data", () => {
+  const db = new DatabaseSync(":memory:");
+  const unsafeSeed = JSON.parse(
+    readFileSync(new URL("../seed/job-scout.json", import.meta.url), "utf8"),
+  );
+  unsafeSeed.routine.dryRun = false;
+  unsafeSeed.routine.enabled = true;
+  unsafeSeed.routine.frozen = true;
+
+  try {
+    initializeSchema(db, { seedData: unsafeSeed });
+
+    const routine = db
+      .prepare("SELECT dry_run, enabled, frozen FROM routines")
+      .get() as { dry_run: number; enabled: number; frozen: number };
+
+    assert.deepEqual({ ...routine }, { dry_run: 1, enabled: 0, frozen: 0 });
+  } finally {
+    db.close();
+  }
+});
+
+test("seed safety assertion rolls back routines armed after insert", () => {
+  for (const assignment of ["dry_run = 0", "enabled = 1", "frozen = 1"]) {
+    const db = new DatabaseSync(":memory:");
+
+    try {
+      assert.throws(
+        () =>
+          initializeSchema(db, {
+            afterRoutineInsert: (database, routineId) => {
+              database
+                .prepare(`UPDATE routines SET ${assignment} WHERE id = ?`)
+                .run(routineId);
+            },
+          }),
+        /Mailarr seed safety assertion failed/,
+      );
+      assert.equal(db.isTransaction, false);
+      assert.equal(
+        (db.prepare("PRAGMA user_version").get() as { user_version: number })
+          .user_version,
+        0,
+      );
+      assert.equal(
+        (
+          db
+            .prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table'")
+            .get() as { count: number }
+        ).count,
+        0,
+      );
+    } finally {
+      db.close();
+    }
+  }
+});
+
 test("manifest declares agent notification capability", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../extension.json", import.meta.url), "utf8"),
   ) as { version: string; capabilities: string[] };
 
-  assert.equal(manifest.version, "0.9.0");
+  assert.equal(manifest.version, "0.9.1");
   assert.ok(manifest.capabilities.includes("agent-notify"));
 });
 
