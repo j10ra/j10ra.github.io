@@ -41,6 +41,7 @@ interface Routine {
   requiredDisclosure: string | null;
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
+  dryRun: boolean;
   enabled: boolean;
   frozen: boolean;
   frozenAt: string | null;
@@ -87,7 +88,6 @@ interface Pipeline {
   sources: RoutineSource[];
   counts: Record<"all" | Stage, number>;
   briefing: { markdown: string; createdAt: string } | null;
-  dryRun: boolean;
   items: Item[];
   total: number;
   page: number;
@@ -107,6 +107,7 @@ interface RoutineForm {
   requiredDisclosure: string;
   keywords: KeywordWeight[];
   scoreFloor: string;
+  dryRun: boolean;
 }
 
 type WorkbenchTarget = number | "new";
@@ -157,6 +158,7 @@ const EMPTY_FORM: RoutineForm = {
   requiredDisclosure: "",
   keywords: [],
   scoreFloor: "",
+  dryRun: true,
 };
 const INPUT_CLASS =
   "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50";
@@ -541,6 +543,7 @@ function RoutineRows({
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-1">
               <FreezeBadge frozen={routine.frozen} />
+              <ModeBadge dryRun={routine.dryRun} />
               {routine.editedSinceFreeze && <EditedSinceFreezeBadge compact />}
               <StateBadge enabled={routine.enabled} />
             </div>
@@ -598,6 +601,7 @@ function RoutineEditor({
                 }))
               : [],
             scoreFloor: routine.scoreFloor?.toString() ?? "",
+            dryRun: routine.dryRun,
           }
         : EMPTY_FORM),
   );
@@ -662,6 +666,7 @@ function RoutineEditor({
         keywords,
         scoreFloor:
           keywords && value.scoreFloor.trim() ? Number(value.scoreFloor) : null,
+        dryRun: value.dryRun,
         ...(routine ? { reviewedUpdatedAt } : {}),
       };
 
@@ -774,6 +779,10 @@ function RoutineEditor({
       </FormSection>
 
       <FormSection title="Guards">
+        <DryRunToggle
+          checked={value.dryRun}
+          onChange={(dryRun) => setValue({ ...value, dryRun })}
+        />
         <Field
           label="Verbatim terms"
           helper="inserted verbatim at {{TERMS}}; the only place digits are allowed"
@@ -1203,6 +1212,7 @@ function RoutineWorkbench({
             <h2 className="text-lg font-semibold">{pipeline.routine.name}</h2>
             <StateBadge enabled={pipeline.routine.enabled} />
             <FreezeBadge frozen={pipeline.routine.frozen} />
+            <ModeBadge dryRun={pipeline.routine.dryRun} />
             {pipeline.routine.editedSinceFreeze && (
               <EditedSinceFreezeBadge />
             )}
@@ -1220,6 +1230,25 @@ function RoutineWorkbench({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <DryRunToggle
+            checked={pipeline.routine.dryRun}
+            onChange={async (dryRun) => {
+              try {
+                await request(
+                  `/api/mailarr/routines/${pipeline.routine.id}/dry-run`,
+                  {
+                    method: "PUT",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ dryRun }),
+                  },
+                );
+                setError(null);
+                await load();
+              } catch (nextError) {
+                setError(message(nextError));
+              }
+            }}
+          />
           <Toggle
             checked={pipeline.routine.enabled}
             label="Enabled"
@@ -1384,7 +1413,7 @@ function RoutineWorkbench({
                 <PipelineItemDetail
                   item={item}
                   routineId={pipeline.routine.id}
-                  dryRun={pipeline.dryRun}
+                  dryRun={pipeline.routine.dryRun}
                   onChanged={async () => {
                     rememberExpanded(null);
                     await load();
@@ -1986,6 +2015,20 @@ function StateBadge({ enabled }: { enabled: boolean }) {
   );
 }
 
+function ModeBadge({ dryRun }: { dryRun: boolean }) {
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+        dryRun
+          ? "border-border text-muted-foreground"
+          : "border-destructive bg-destructive/10 text-destructive"
+      }`}
+    >
+      {dryRun ? "dry run" : "LIVE"}
+    </span>
+  );
+}
+
 function EditedSinceFreezeBadge({ compact = false }: { compact?: boolean }) {
   return (
     <span className="shrink-0 rounded-full border border-amber-500/50 px-2 py-0.5 text-[10px] font-medium text-amber-500">
@@ -2090,6 +2133,57 @@ function Toggle({
         onChange={(event) => onChange(event.target.checked)}
       />
       {label}
+    </label>
+  );
+}
+
+function DryRunToggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void | Promise<void>;
+}) {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!checked) setArmed(false);
+  }, [checked]);
+
+  const change = async (nextChecked: boolean) => {
+    if (!nextChecked && !armed) {
+      setArmed(true);
+      return;
+    }
+
+    setBusy(true);
+    setArmed(false);
+    try {
+      await onChange(nextChecked);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label
+      className={`flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs ${
+        armed
+          ? "border-destructive bg-destructive/10 text-destructive"
+          : "border-border"
+      }`}
+    >
+      <input
+        className="h-4 w-4 rounded border border-border bg-background accent-primary outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        type="checkbox"
+        checked={checked}
+        disabled={busy}
+        onChange={(event) => void change(event.target.checked)}
+      />
+      {armed
+        ? "Click again to go live"
+        : "Dry run (rehearse only, nothing sends)"}
     </label>
   );
 }

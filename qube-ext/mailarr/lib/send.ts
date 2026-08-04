@@ -26,7 +26,6 @@ export interface SendRequest {
   subject?: string;
   draft: string;
   smtp: SmtpSettings;
-  dryRun: boolean;
   now?: Date;
   deliver?: (message: {
     from: string;
@@ -101,6 +100,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
     enforceSendGuards(input.db, input);
     const item = getItem(input.db, input.itemId);
     const routine = getRoutine(input.db, item.routineId);
+    const dryRun = routine.dryRun;
     const recipientAddress = input.to ?? item.contactEmail ?? "";
     const recipient = recipientAddress.trim().toLowerCase();
     const itemRecipient = item.contactEmail?.trim().toLowerCase();
@@ -128,7 +128,7 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
 
     const deliver = input.deliver ?? ((message) => deliverSmtp(message, input.smtp));
 
-    if (!input.dryRun) {
+    if (!dryRun) {
       await deliver({
         from: input.smtp.fromAddress,
         to: recipientAddress,
@@ -145,11 +145,11 @@ export async function sendFirstContact(input: SendRequest): Promise<SendResult> 
       body,
       sentAt,
       runId: input.runId,
-      dryRun: input.dryRun,
+      dryRun,
       itemId: input.itemId,
     });
 
-    return { dryRun: input.dryRun, body, sentAt };
+    return { dryRun, body, sentAt };
   } finally {
     release();
   }

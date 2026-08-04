@@ -28,6 +28,7 @@ import {
   removeSource,
   routineDashboard,
   saveBriefing,
+  setRoutineDryRun,
   setRoutineFrozen,
   startRun,
   type RoutineInput,
@@ -44,7 +45,7 @@ import {
   sendFirstContact,
 } from "../lib/send.js";
 import { TERMS_TOKEN, validatePitch, validateSubject } from "../lib/validate.js";
-import { dryRunEnabled, mailarrMcpServer } from "../mcp.js";
+import { mailarrMcpServer } from "../mcp.js";
 import { registerMailarrRoutes } from "../routes.js";
 import mailarr, {
   BriefingMarkdown,
@@ -71,9 +72,10 @@ const BASE_ROUTINE: RoutineInput = {
   requiredDisclosure: "I am an AI assistant.",
   keywords: null,
   scoreFloor: null,
+  dryRun: true,
 };
 
-test("fresh schema is version 3 and seeds disabled routine data with permanent history", () => {
+test("fresh schema is version 4 and seeds a disabled dry-run routine with permanent history", () => {
   withDatabase((db) => {
     const version = db.prepare("PRAGMA user_version").get() as {
       user_version: number;
@@ -88,12 +90,20 @@ test("fresh schema is version 3 and seeds disabled routine data with permanent h
       .prepare("SELECT company, dry_run FROM sent_log ORDER BY company")
       .all() as Array<{ company: string; dry_run: number }>;
 
-    assert.equal(version.user_version, 3);
+    assert.equal(version.user_version, 4);
     const itemColumns = db.prepare("PRAGMA table_info(items)").all() as Array<{
       name: string;
     }>;
+    const routineColumns = db.prepare("PRAGMA table_info(routines)").all() as Array<{
+      name: string;
+      dflt_value: string | null;
+    }>;
 
     assert.ok(itemColumns.some((column) => column.name === "draft_subject"));
+    assert.equal(
+      routineColumns.find((column) => column.name === "dry_run")?.dflt_value,
+      "1",
+    );
     assert.equal(routines.length, 1);
     assert.equal(routines[0].enabled, 0);
     assert.equal(routines[0].frozen, 0);
@@ -103,6 +113,7 @@ test("fresh schema is version 3 and seeds disabled routine data with permanent h
     assert.equal(routines[0].worktree_id, null);
     assert.equal(routines[0].keywords, null);
     assert.equal(routines[0].score_floor, null);
+    assert.equal(routines[0].dry_run, 1);
     assert.equal(sourceCount.count, 0);
     assert.deepEqual(
       history.map((entry) => [entry.company, entry.dry_run]),
@@ -120,7 +131,7 @@ test("manifest declares agent notification capability", () => {
     readFileSync(new URL("../extension.json", import.meta.url), "utf8"),
   ) as { version: string; capabilities: string[] };
 
-  assert.equal(manifest.version, "0.8.1");
+  assert.equal(manifest.version, "0.9.0");
   assert.ok(manifest.capabilities.includes("agent-notify"));
 });
 
@@ -167,6 +178,42 @@ test("panel routes persist routine session bindings through create and update", 
       assert.equal(persisted.session, "qube_cx_j10ra-github-io_3");
       assert.equal(persisted.sessionLabel, "codex · gpt-5.6-sol");
       assert.equal(persisted.worktreeId, 73088148);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("panel dry-run PUT toggles the routine mode", async () => {
+  await withPanelRoutes(async (routes, dataDir) => {
+    const created = (await routes.call("POST", "/api/mailarr/routines", {
+      ...BASE_ROUTINE,
+      name: "Mode toggle routine",
+    })) as RoutineResponse;
+
+    assert.equal(created.routine.dryRun, true);
+
+    const live = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id/dry-run",
+      { dryRun: false },
+      { id: String(created.routine.id) },
+    )) as RoutineResponse;
+
+    assert.equal(live.routine.dryRun, false);
+
+    const dry = (await routes.call(
+      "PUT",
+      "/api/mailarr/routines/:id/dry-run",
+      { dryRun: true },
+      { id: String(created.routine.id) },
+    )) as RoutineResponse;
+
+    assert.equal(dry.routine.dryRun, true);
+
+    const db = openMailarrDatabase(dataDir);
+    try {
+      assert.equal(getRoutine(db, created.routine.id).dryRun, true);
     } finally {
       db.close();
     }
@@ -340,11 +387,13 @@ test("routines_due carries routine session bindings", async () => {
       const runs = JSON.parse(content[0]?.text ?? "[]") as Array<{
         session: string | null;
         sessionLabel: string | null;
+        dryRun: boolean;
       }>;
 
       assert.equal(runs.length, 1);
       assert.equal(runs[0].session, "qube_cc_j10ra-github-io_2");
       assert.equal(runs[0].sessionLabel, "claude · sonnet");
+      assert.equal(runs[0].dryRun, true);
 
       const routineResponse = await client.callTool({
         name: "routine_get",
@@ -357,21 +406,23 @@ test("routines_due carries routine session bindings", async () => {
       const fetched = JSON.parse(routineContent[0]?.text ?? "{}") as {
         session: string | null;
         sessionLabel: string | null;
+        dryRun: boolean;
       };
 
       assert.equal(fetched.session, "qube_cc_j10ra-github-io_2");
       assert.equal(fetched.sessionLabel, "claude · sonnet");
+      assert.equal(fetched.dryRun, true);
     }, dataDir);
   });
 });
 
-test("schema rejects legacy versions with database deletion guidance", () => {
+test("schema rejects v3 with database deletion guidance", () => {
   const db = new DatabaseSync(":memory:");
-  db.exec("PRAGMA user_version = 1");
+  db.exec("PRAGMA user_version = 3");
 
   assert.throws(
     () => initializeSchema(db),
-    /Unsupported Mailarr schema version 1; delete mailarr\.db/,
+    /Unsupported Mailarr schema version 3; delete mailarr\.db/,
   );
   assert.equal(db.isTransaction, false);
   db.close();
@@ -394,7 +445,7 @@ test("schema initialization rechecks version under its transaction", () => {
     assert.equal(
       (second.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
-      3,
+      4,
     );
   } finally {
     first.close();
@@ -1041,6 +1092,7 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         "session_label",
         "worktree_id",
         "enabled",
+        "dry_run",
         "frozen",
         "frozen_at",
       ]) {
@@ -1073,6 +1125,17 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
         assert.equal(response.isError, true);
         assert.match(JSON.stringify(response), /routine is frozen/iu);
       }
+
+      const panelOnlyRoutine = createTestRoutine(db, {
+        name: "Panel-only dry run",
+      });
+      const dryRunAttempt = await client.callTool({
+        name: "routine_update",
+        arguments: { routine_id: panelOnlyRoutine.id, dry_run: false },
+      });
+
+      assert.equal(dryRunAttempt.isError, true);
+      assert.equal(getRoutine(db, panelOnlyRoutine.id).dryRun, true);
     }, dataDir);
   });
 });
@@ -1168,7 +1231,6 @@ test("deleteItem removes review drafts and protects ownership and audit history"
       runId: run.id,
       draft: validDraft(firstRoutine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: true,
     });
     assert.equal(getItem(db, dryRun.id).contactedDryRun, true);
     assert.equal(deleteItem(db, firstRoutine.id, dryRun.id).deleted, true);
@@ -1185,13 +1247,13 @@ test("deleteItem removes review drafts and protects ownership and audit history"
       draftSubject: "Delivered subject",
       draftPitch: validDraft(firstRoutine.requiredDisclosure),
     });
+    setRoutineDryRun(db, firstRoutine.id, false);
     await sendFirstContact({
       db,
       itemId: delivered.id,
       runId: run.id,
       draft: validDraft(firstRoutine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: false,
       deliver: async () => undefined,
     });
 
@@ -1222,21 +1284,21 @@ test("deleteItem removes review drafts and protects ownership and audit history"
         draftPitch: validDraft(firstRoutine.requiredDisclosure),
       });
     }
+    setRoutineDryRun(db, firstRoutine.id, true);
     await sendFirstContact({
       db,
       itemId: mixedDry.id,
       runId: run.id,
       draft: validDraft(firstRoutine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: true,
     });
+    setRoutineDryRun(db, firstRoutine.id, false);
     await sendFirstContact({
       db,
       itemId: mixedReal.id,
       runId: run.id,
       draft: validDraft(firstRoutine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: false,
       deliver: async () => undefined,
     });
 
@@ -1394,6 +1456,7 @@ test("unlock edit send fails, then panel freeze enforces current content guards"
     const created = (await routes.call("POST", "/api/mailarr/routines", {
       ...BASE_ROUTINE,
       name: "Lifecycle routine",
+      dryRun: false,
     })) as RoutineResponse;
     const routineId = created.routine.id;
 
@@ -1445,7 +1508,6 @@ test("unlock edit send fails, then panel freeze enforces current content guards"
           subject,
           draft,
           smtp: smtp(),
-          dryRun: false,
           deliver: async () => {
             deliveries += 1;
           },
@@ -1522,7 +1584,47 @@ test("unlocked routines refuse sends even in dry-run mode", async () => {
   });
 });
 
-test("panel send uses the stored reviewed draft and completes a manual dry-run", async () => {
+test("agent send uses the routine dry-run flag", async () => {
+  await withDatabaseAsync(async (db, dataDir) => {
+    const routine = createTestRoutine(db, { name: "Agent dry-run routine" });
+    setRoutineFrozen(db, routine.id, true);
+    const run = startRun(db, createRun(db, routine.id).id);
+    const item = addQualifiedItem(
+      db,
+      routine.id,
+      run.id,
+      "Agent Dry Run Company",
+      "agent-dry-run",
+    );
+
+    updateItem(db, item.id, {
+      draftSubject: "Stored agent subject",
+      draftPitch: validDraft(routine.requiredDisclosure),
+    });
+
+    await withMailarrClient(async (client) => {
+      const response = await client.callTool({
+        name: "send_first_contact",
+        arguments: {
+          run_id: run.id,
+          item_id: item.id,
+          pitch: validDraft(routine.requiredDisclosure),
+        },
+      });
+      const content = response.content as Array<{ type: string; text?: string }>;
+      const result = JSON.parse(content[0]?.text ?? "{}") as {
+        dryRun: boolean;
+      };
+
+      assert.equal(response.isError, undefined);
+      assert.equal(result.dryRun, true);
+    }, dataDir);
+
+    assert.equal(getItem(db, item.id).contactedDryRun, true);
+  });
+});
+
+test("panel send uses the stored draft and routine dry-run flag", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const db = openMailarrDatabase(dataDir);
     let routineId = 0;
@@ -1764,7 +1866,10 @@ test("panel send surfaces cap and dedupe guards in failed manual runs", async ()
         });
       }
 
-      const dedupe = createTestRoutine(db, { name: "Panel dedupe routine" });
+      const dedupe = createTestRoutine(db, {
+        name: "Panel dedupe routine",
+        dryRun: false,
+      });
 
       dedupeRoutineId = dedupe.id;
       setRoutineFrozen(db, dedupe.id, true);
@@ -1787,7 +1892,6 @@ test("panel send surfaces cap and dedupe guards in failed manual runs", async ()
         runId: dedupeSourceRun.id,
         draft: validDraft(dedupe.requiredDisclosure),
         smtp: smtp(),
-        dryRun: false,
         deliver: async () => undefined,
       });
       const duplicate = addQualifiedItem(
@@ -1873,7 +1977,7 @@ test("verbatim terms replace the token exactly once", () => {
 
 test("send defaults to the reviewed draft subject and explicit subject overrides", async () => {
   await withDatabaseAsync(async (db) => {
-    const routine = createTestRoutine(db);
+    const routine = createTestRoutine(db, { dryRun: false });
     setRoutineFrozen(db, routine.id, true);
     const run = startRun(db, createRun(db, routine.id).id);
     const storedItem = addQualifiedItem(
@@ -1903,7 +2007,6 @@ test("send defaults to the reviewed draft subject and explicit subject overrides
         to: storedItem.contactEmail ?? "",
         draft: validDraft(routine.requiredDisclosure),
         smtp: smtp(),
-        dryRun: false,
       }),
       /numeric characters/,
     );
@@ -1916,7 +2019,6 @@ test("send defaults to the reviewed draft subject and explicit subject overrides
       to: storedItem.contactEmail ?? "",
       draft: validDraft(routine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: false,
       deliver: async ({ subject }) => {
         deliveredSubjects.push(subject);
       },
@@ -1929,7 +2031,6 @@ test("send defaults to the reviewed draft subject and explicit subject overrides
       subject: "Explicit subject",
       draft: validDraft(routine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: false,
       deliver: async ({ subject }) => {
         deliveredSubjects.push(subject);
       },
@@ -1960,7 +2061,6 @@ test("dry runs count toward the cap without creating permanent dedupe", async ()
       subject: "Hello",
       draft: validDraft(routine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: true,
       now: new Date("2030-01-02T01:00:00.000Z"),
       deliver: async () => {
         deliveries += 1;
@@ -1971,6 +2071,7 @@ test("dry runs count toward the cap without creating permanent dedupe", async ()
     assert.equal(deliveries, 0);
     assert.equal(hasSentCompany(db, item.company), false);
     updateItem(db, item.id, { stage: "qualified" });
+    setRoutineDryRun(db, routine.id, false);
 
     await assert.rejects(
       sendFirstContact({
@@ -1981,7 +2082,6 @@ test("dry runs count toward the cap without creating permanent dedupe", async ()
         subject: "Hello again",
         draft: validDraft(routine.requiredDisclosure),
         smtp: smtp(),
-        dryRun: false,
         now: new Date("2030-01-02T02:00:00.000Z"),
         deliver: async () => {
           deliveries += 1;
@@ -1994,7 +2094,7 @@ test("dry runs count toward the cap without creating permanent dedupe", async ()
 
 test("real sends deliver once and permanently dedupe the company", async () => {
   await withDatabaseAsync(async (db) => {
-    const routine = createTestRoutine(db);
+    const routine = createTestRoutine(db, { dryRun: false });
     setRoutineFrozen(db, routine.id, true);
     const run = startRun(db, createRun(db, routine.id).id);
     const first = addQualifiedItem(db, routine.id, run.id, "Permanent Company", "one");
@@ -2008,7 +2108,6 @@ test("real sends deliver once and permanently dedupe the company", async () => {
       subject: "Hello",
       draft: validDraft(routine.requiredDisclosure),
       smtp: smtp(),
-      dryRun: false,
       deliver: async () => {
         deliveries += 1;
       },
@@ -2034,7 +2133,6 @@ test("real sends deliver once and permanently dedupe the company", async () => {
         subject: "Again",
         draft: validDraft(routine.requiredDisclosure),
         smtp: smtp(),
-        dryRun: false,
         deliver: async () => {
           deliveries += 1;
         },
@@ -2061,7 +2159,6 @@ test("send requires the recipient to match the stored contact", async () => {
         subject: "Hello",
         draft: validDraft(routine.requiredDisclosure),
         smtp: smtp(),
-        dryRun: true,
       }),
       /Recipient must match/,
     );
@@ -2135,14 +2232,6 @@ test("a source-maintenance run can finish successfully without sending", () => {
     assert.equal(finished.status, "done");
     assert.equal(finished.sentCount, 0);
   });
-});
-
-test("dry-run defaults on when unset and parses explicit false values", () => {
-  assert.equal(dryRunEnabled({}), true);
-  assert.equal(dryRunEnabled({ dry_run: "" }), true);
-  assert.equal(dryRunEnabled({ dry_run: true }), true);
-  assert.equal(dryRunEnabled({ dry_run: "false" }), false);
-  assert.equal(dryRunEnabled({ dry_run: 0 }), false);
 });
 
 function createTestRoutine(
@@ -2240,6 +2329,20 @@ async function withMailarrClient(
     if (dataDir) {
       return {
         dataDir,
+        config: {
+          dry_run: false,
+          smtp_host: "smtp.example.test",
+          smtp_port: 465,
+          from_address: "sender@example.test",
+        },
+        secrets: {
+          get: async (key: string) =>
+            key === "smtp_user"
+              ? "user"
+              : key === "smtp_password"
+                ? "secret"
+                : null,
+        },
         broadcast: () => undefined,
       } as unknown as ExtensionContext;
     }
@@ -2266,6 +2369,7 @@ interface RoutineResponse {
     session: string | null;
     sessionLabel: string | null;
     worktreeId: number | null;
+    dryRun: boolean;
     frozen: boolean;
     frozenAt: string | null;
     editedSinceFreeze: boolean;
@@ -2324,7 +2428,7 @@ async function withPanelRoutes(
   const ctx = {
     dataDir,
     config: {
-      dry_run: true,
+      dry_run: false,
       smtp_host: "smtp.example.test",
       smtp_port: 465,
       from_address: "sender@example.test",

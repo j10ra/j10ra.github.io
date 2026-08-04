@@ -27,6 +27,7 @@ const ROUTINE: RoutineInput = {
   requiredDisclosure: "I am an AI assistant.",
   keywords: null,
   scoreFloor: null,
+  dryRun: true,
 };
 
 test("scheduler nudges the configured worktree with an idempotent run payload", async () => {
