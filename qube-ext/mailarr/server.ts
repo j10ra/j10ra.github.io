@@ -16,17 +16,6 @@ export default defineExtension({
   id: "mailarr",
   settings: [
     {
-      id: "delivery",
-      title: "Delivery",
-      fields: [
-        {
-          key: "dry_run",
-          label: "Dry run",
-          placeholder: "true, defaults to true when unset",
-        },
-      ],
-    },
-    {
       id: "smtp",
       title: "SMTP",
       fields: [

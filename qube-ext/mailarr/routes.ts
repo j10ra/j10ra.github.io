@@ -20,6 +20,7 @@ import {
   routineDashboard,
   saveBriefing,
   type RoutineInput,
+  setRoutineDryRun,
   setRoutineEnabled,
   setRoutineFrozen,
   startRun,
@@ -28,7 +29,6 @@ import {
 import { ITEM_STAGES, type ItemStage } from "./lib/model.js";
 import { notifyPendingRun } from "./lib/scheduler.js";
 import { requireFrozenRoutine, sendFirstContact } from "./lib/send.js";
-import { dryRunEnabled } from "./mcp.js";
 
 type RegisterRoutes = NonNullable<Extension["registerRoutes"]>;
 type ExtensionApp = Parameters<RegisterRoutes>[0];
@@ -78,11 +78,12 @@ export function registerMailarrRoutes(
           );
         }
 
-        const routine = updateRoutine(
-          db,
-          routineId,
-          routineInput(body),
-        );
+        const { dryRun, ...routineUpdate } = routineInput(body);
+        let routine = updateRoutine(db, routineId, routineUpdate);
+
+        if (current.dryRun !== dryRun) {
+          routine = setRoutineDryRun(db, routineId, dryRun);
+        }
 
         ctx.broadcast({ type: "mailarr-changed" });
 
@@ -99,6 +100,23 @@ export function registerMailarrRoutes(
           db,
           positiveInt(req.params.id, "routine id"),
           Boolean(body.enabled),
+        );
+
+        ctx.broadcast({ type: "mailarr-changed" });
+
+        return { routine };
+      }),
+  );
+
+  app.put<{ Params: { id: string } }>(
+    "/api/mailarr/routines/:id/dry-run",
+    async (req, reply) =>
+      useDb(req, reply, getCtx, (db, ctx) => {
+        const body = record(req.body);
+        const routine = setRoutineDryRun(
+          db,
+          positiveInt(req.params.id, "routine id"),
+          boolean(body.dryRun, "dry run"),
         );
 
         ctx.broadcast({ type: "mailarr-changed" });
@@ -230,7 +248,6 @@ export function registerMailarrRoutes(
               password: smtpPassword ?? "",
               fromAddress: configString(ctx.config, "from_address"),
             },
-            dryRun: dryRunEnabled(ctx.config),
           });
           saveBriefing(
             db,
@@ -268,7 +285,7 @@ export function registerMailarrRoutes(
   }>(
     "/api/mailarr/routines/:id/pipeline",
     async (req, reply) =>
-      useDb(req, reply, getCtx, (db, ctx) => {
+      useDb(req, reply, getCtx, (db) => {
         const routineId = positiveInt(req.params.id, "routine id");
         const stage = parseStage(req.query.stage);
         const page = positiveInt(req.query.page ?? 1, "page");
@@ -291,7 +308,6 @@ export function registerMailarrRoutes(
           sources: listSources(db, routineId),
           counts: pipelineCounts(db, routineId),
           briefing: latestBriefing(db, routineId),
-          dryRun: dryRunEnabled(ctx.config),
           items,
           total,
           page,
@@ -345,6 +361,7 @@ function routineInput(value: unknown): RoutineInput {
     requiredDisclosure: nullableString(body.requiredDisclosure),
     keywords,
     scoreFloor,
+    dryRun: boolean(body.dryRun, "dry run"),
   };
 }
 

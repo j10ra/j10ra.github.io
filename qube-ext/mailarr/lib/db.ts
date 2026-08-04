@@ -26,6 +26,7 @@ interface SeedData {
     requiredDisclosure: string | null;
     keywords: Record<string, number> | null;
     scoreFloor: number | null;
+    dryRun: boolean;
     enabled: boolean;
     frozen: boolean;
     frozenAt: string | null;
@@ -67,7 +68,7 @@ export function initializeSchema(db: DatabaseSync): void {
         .user_version,
     );
 
-    if (version === 3) {
+    if (version === 4) {
       db.exec("COMMIT");
       return;
     }
@@ -92,6 +93,7 @@ export function initializeSchema(db: DatabaseSync): void {
       required_disclosure TEXT,
       keywords TEXT,
       score_floor INTEGER,
+      dry_run INTEGER NOT NULL DEFAULT 1 CHECK (dry_run IN (0, 1)),
       enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
       frozen INTEGER NOT NULL DEFAULT 0 CHECK (frozen IN (0, 1)),
       frozen_at TEXT,
@@ -177,7 +179,7 @@ export function initializeSchema(db: DatabaseSync): void {
       WHERE dry_run = 0;
     `);
     seedInitialData(db);
-    db.exec("PRAGMA user_version = 3; COMMIT");
+    db.exec("PRAGMA user_version = 4; COMMIT");
   } catch (error) {
     if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
@@ -192,9 +194,9 @@ function seedInitialData(db: DatabaseSync): void {
     INSERT INTO routines (
       name, cron, order_text, session, session_label, worktree_id, daily_cap,
       verbatim_terms, blocked_topics,
-      required_disclosure, keywords, score_floor, enabled, frozen, frozen_at,
-      created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      required_disclosure, keywords, score_floor, dry_run, enabled, frozen,
+      frozen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     routine.name,
     routine.cron,
@@ -208,6 +210,7 @@ function seedInitialData(db: DatabaseSync): void {
     routine.requiredDisclosure,
     serializeKeywords(routine.keywords),
     routine.scoreFloor,
+    routine.dryRun ? 1 : 0,
     routine.enabled ? 1 : 0,
     routine.frozen ? 1 : 0,
     routine.frozenAt,
@@ -239,7 +242,10 @@ export interface RoutineInput {
   requiredDisclosure: string | null;
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
+  dryRun: boolean;
 }
+
+type RoutineUpdateInput = Omit<RoutineInput, "dryRun">;
 
 export interface RoutineContentInput {
   orderText?: string;
@@ -251,14 +257,18 @@ export interface RoutineContentInput {
 }
 
 export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
+  if (typeof input.dryRun !== "boolean") {
+    throw new Error("routine dry run must be a boolean");
+  }
   const at = nowIso();
   const result = db.prepare(`
     INSERT INTO routines (
       name, cron, order_text, session, session_label, worktree_id, daily_cap,
       verbatim_terms, blocked_topics,
-      required_disclosure, keywords, score_floor, enabled, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-  `).run(...routineValues(input), at, at);
+      required_disclosure, keywords, score_floor, dry_run, enabled, created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(...routineValues(input), input.dryRun ? 1 : 0, at, at);
 
   return getRoutine(db, Number(result.lastInsertRowid));
 }
@@ -266,7 +276,7 @@ export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
 export function updateRoutine(
   db: DatabaseSync,
   id: number,
-  input: RoutineInput,
+  input: RoutineUpdateInput,
 ): Routine {
   const current = getRoutine(db, id);
   const result = db.prepare(`
@@ -321,7 +331,7 @@ export function updateRoutineContent(
   });
 }
 
-function routineValues(input: RoutineInput): Array<string | number | null> {
+function routineValues(input: RoutineUpdateInput): Array<string | number | null> {
   validateRoutineInput(input);
 
   return [
@@ -340,7 +350,7 @@ function routineValues(input: RoutineInput): Array<string | number | null> {
   ];
 }
 
-function validateRoutineInput(input: RoutineInput): void {
+function validateRoutineInput(input: RoutineUpdateInput): void {
   if (!input.name.trim()) throw new Error("routine name is required");
   if (!input.cron.trim()) throw new Error("routine cron is required");
   if (!input.orderText.trim()) throw new Error("routine order is required");
@@ -382,6 +392,25 @@ export function setRoutineEnabled(
     .prepare("UPDATE routines SET enabled = ?, updated_at = ? WHERE id = ?")
     .run(
       enabled ? 1 : 0,
+      nextTimestamp(current.updatedAt, current.frozenAt),
+      id,
+    );
+
+  if (result.changes === 0) throw new Error(`routine ${id} not found`);
+
+  return getRoutine(db, id);
+}
+
+export function setRoutineDryRun(
+  db: DatabaseSync,
+  id: number,
+  dryRun: boolean,
+): Routine {
+  const current = getRoutine(db, id);
+  const result = db
+    .prepare("UPDATE routines SET dry_run = ?, updated_at = ? WHERE id = ?")
+    .run(
+      dryRun ? 1 : 0,
       nextTimestamp(current.updatedAt, current.frozenAt),
       id,
     );
@@ -573,12 +602,13 @@ export function listPendingRuns(
     routineName: string;
     session: string | null;
     sessionLabel: string | null;
+    dryRun: boolean;
   }
 > {
   return (
     db.prepare(`
       SELECT runs.*, routines.name AS routine_name, routines.session,
-        routines.session_label
+        routines.session_label, routines.dry_run
       FROM runs
       JOIN routines ON routines.id = runs.routine_id
       WHERE runs.status = 'pending'
@@ -589,6 +619,7 @@ export function listPendingRuns(
     routineName: String(row.routine_name),
     session: row.session ? String(row.session) : null,
     sessionLabel: row.session_label ? String(row.session_label) : null,
+    dryRun: dryRunFromRow(row),
   }));
 }
 
@@ -1107,6 +1138,10 @@ export function pipelineCounts(
 
 type DbRow = Record<string, string | number | bigint | null>;
 
+export function dryRunFromRow(row: Record<string, unknown>): boolean {
+  return Boolean(row.dry_run ?? 1);
+}
+
 function routineFromRow(row: DbRow): Routine {
   return {
     id: Number(row.id),
@@ -1122,6 +1157,7 @@ function routineFromRow(row: DbRow): Routine {
     requiredDisclosure: row.required_disclosure ? String(row.required_disclosure) : null,
     keywords: parseKeywords(row.keywords),
     scoreFloor: row.score_floor === null ? null : Number(row.score_floor),
+    dryRun: dryRunFromRow(row),
     enabled: Boolean(row.enabled),
     frozen: Boolean(row.frozen),
     frozenAt: row.frozen_at ? String(row.frozen_at) : null,

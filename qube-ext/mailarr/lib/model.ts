@@ -25,6 +25,7 @@ export interface Routine {
   requiredDisclosure: string | null;
   keywords: Record<string, number> | null;
   scoreFloor: number | null;
+  dryRun: boolean;
   enabled: boolean;
   frozen: boolean;
   frozenAt: string | null;

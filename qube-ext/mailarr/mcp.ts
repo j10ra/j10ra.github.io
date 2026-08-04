@@ -85,8 +85,8 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
     "routine_update",
     {
       description:
-        "Edit a routine's six agent-authorable content fields while it is unlocked. Frozen routines refuse edits. Daily cap, session, session label, enabled state, and frozen state remain panel-only.",
-      inputSchema: {
+        "Edit a routine's six agent-authorable content fields while it is unlocked. Frozen routines refuse edits. Daily cap, session, session label, dry-run mode, enabled state, and frozen state remain panel-only.",
+      inputSchema: z.object({
         routine_id: z.number().int().positive(),
         order_text: z.string().optional(),
         verbatim_terms: z.string().optional(),
@@ -94,7 +94,7 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
         required_disclosure: z.string().nullable().optional(),
         keywords: z.record(z.number()).nullable().optional(),
         score_floor: z.number().int().nullable().optional(),
-      },
+      }).strict(),
     },
     ({
       routine_id,
@@ -363,7 +363,6 @@ export function mailarrMcpServer(ctx: () => ExtensionContext): McpServer {
               password: smtpPassword ?? "",
               fromAddress: configString(current.config, "from_address"),
             },
-            dryRun: dryRunEnabled(current.config),
           });
 
           current.broadcast({ type: "mailarr-changed" });
@@ -434,15 +433,6 @@ function configPort(config: Record<string, unknown>): number {
   const value = Number(config.smtp_port);
 
   return Number.isInteger(value) ? value : 0;
-}
-
-export function dryRunEnabled(config: Record<string, unknown>): boolean {
-  const value = config.dry_run;
-
-  if (value === undefined || value === null || value === "") return true;
-  if (typeof value === "boolean") return value;
-
-  return !["false", "0", "off", "no"].includes(String(value).trim().toLowerCase());
 }
 
 function message(error: unknown): string {
