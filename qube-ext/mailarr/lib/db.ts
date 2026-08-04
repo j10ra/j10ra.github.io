@@ -245,6 +245,8 @@ export interface RoutineInput {
   dryRun: boolean;
 }
 
+type RoutineUpdateInput = Omit<RoutineInput, "dryRun">;
+
 export interface RoutineContentInput {
   orderText?: string;
   verbatimTerms?: string;
@@ -255,6 +257,9 @@ export interface RoutineContentInput {
 }
 
 export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
+  if (typeof input.dryRun !== "boolean") {
+    throw new Error("routine dry run must be a boolean");
+  }
   const at = nowIso();
   const result = db.prepare(`
     INSERT INTO routines (
@@ -263,7 +268,7 @@ export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
       required_disclosure, keywords, score_floor, dry_run, enabled, created_at,
       updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-  `).run(...routineValues(input), at, at);
+  `).run(...routineValues(input), input.dryRun ? 1 : 0, at, at);
 
   return getRoutine(db, Number(result.lastInsertRowid));
 }
@@ -271,15 +276,14 @@ export function createRoutine(db: DatabaseSync, input: RoutineInput): Routine {
 export function updateRoutine(
   db: DatabaseSync,
   id: number,
-  input: RoutineInput,
+  input: RoutineUpdateInput,
 ): Routine {
   const current = getRoutine(db, id);
   const result = db.prepare(`
     UPDATE routines
     SET name = ?, cron = ?, order_text = ?, session = ?, session_label = ?,
         worktree_id = ?, daily_cap = ?, verbatim_terms = ?, blocked_topics = ?,
-        required_disclosure = ?, keywords = ?, score_floor = ?, dry_run = ?,
-        updated_at = ?
+        required_disclosure = ?, keywords = ?, score_floor = ?, updated_at = ?
     WHERE id = ?
   `).run(
     ...routineValues(input),
@@ -324,11 +328,10 @@ export function updateRoutineContent(
         : input.requiredDisclosure,
     keywords,
     scoreFloor,
-    dryRun: current.dryRun,
   });
 }
 
-function routineValues(input: RoutineInput): Array<string | number | null> {
+function routineValues(input: RoutineUpdateInput): Array<string | number | null> {
   validateRoutineInput(input);
 
   return [
@@ -344,11 +347,10 @@ function routineValues(input: RoutineInput): Array<string | number | null> {
     trimmedOrNull(input.requiredDisclosure),
     serializeKeywords(input.keywords),
     input.keywords === null ? null : input.scoreFloor,
-    input.dryRun ? 1 : 0,
   ];
 }
 
-function validateRoutineInput(input: RoutineInput): void {
+function validateRoutineInput(input: RoutineUpdateInput): void {
   if (!input.name.trim()) throw new Error("routine name is required");
   if (!input.cron.trim()) throw new Error("routine cron is required");
   if (!input.orderText.trim()) throw new Error("routine order is required");
@@ -370,9 +372,6 @@ function validateRoutineInput(input: RoutineInput): void {
   }
   if (input.keywords === null && input.scoreFloor !== null) {
     throw new Error("routine score floor requires keywords");
-  }
-  if (typeof input.dryRun !== "boolean") {
-    throw new Error("routine dry run must be a boolean");
   }
   if (input.keywords) {
     for (const [term, weight] of Object.entries(input.keywords)) {
@@ -620,7 +619,7 @@ export function listPendingRuns(
     routineName: String(row.routine_name),
     session: row.session ? String(row.session) : null,
     sessionLabel: row.session_label ? String(row.session_label) : null,
-    dryRun: Boolean(row.dry_run),
+    dryRun: dryRunFromRow(row),
   }));
 }
 
@@ -1139,6 +1138,10 @@ export function pipelineCounts(
 
 type DbRow = Record<string, string | number | bigint | null>;
 
+export function dryRunFromRow(row: Record<string, unknown>): boolean {
+  return Boolean(row.dry_run ?? 1);
+}
+
 function routineFromRow(row: DbRow): Routine {
   return {
     id: Number(row.id),
@@ -1154,7 +1157,7 @@ function routineFromRow(row: DbRow): Routine {
     requiredDisclosure: row.required_disclosure ? String(row.required_disclosure) : null,
     keywords: parseKeywords(row.keywords),
     scoreFloor: row.score_floor === null ? null : Number(row.score_floor),
-    dryRun: Boolean(row.dry_run),
+    dryRun: dryRunFromRow(row),
     enabled: Boolean(row.enabled),
     frozen: Boolean(row.frozen),
     frozenAt: row.frozen_at ? String(row.frozen_at) : null,

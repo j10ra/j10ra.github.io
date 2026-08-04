@@ -78,11 +78,12 @@ export function registerMailarrRoutes(
           );
         }
 
-        const routine = updateRoutine(
-          db,
-          routineId,
-          routineInput(body),
-        );
+        const { dryRun, ...routineUpdate } = routineInput(body);
+        let routine = updateRoutine(db, routineId, routineUpdate);
+
+        if (current.dryRun !== dryRun) {
+          routine = setRoutineDryRun(db, routineId, dryRun);
+        }
 
         ctx.broadcast({ type: "mailarr-changed" });
 

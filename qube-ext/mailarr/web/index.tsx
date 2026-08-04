@@ -2179,6 +2179,7 @@ function DryRunToggle({
         type="checkbox"
         checked={checked}
         disabled={busy}
+        onBlur={() => setArmed(false)}
         onChange={(event) => void change(event.target.checked)}
       />
       {armed

@@ -14,6 +14,7 @@ import {
   createRoutine,
   createRun,
   deleteItem,
+  dryRunFromRow,
   finishRun,
   getItem,
   getRoutine,
@@ -33,6 +34,7 @@ import {
   startRun,
   type RoutineInput,
   updateItem,
+  updateRoutineContent,
   updateSource,
 } from "../lib/db.js";
 import { filterContactEmail } from "../lib/contact.js";
@@ -135,6 +137,12 @@ test("manifest declares agent notification capability", () => {
   assert.ok(manifest.capabilities.includes("agent-notify"));
 });
 
+test("routine row parsing defaults missing dry_run to dry-run mode", () => {
+  assert.equal(dryRunFromRow({}), true);
+  assert.equal(dryRunFromRow({ dry_run: 1 }), true);
+  assert.equal(dryRunFromRow({ dry_run: 0 }), false);
+});
+
 test("panel routes persist routine session bindings through create and update", async () => {
   await withPanelRoutes(async (routes, dataDir) => {
     const createdResponse = (await routes.call(
@@ -162,6 +170,7 @@ test("panel routes persist routine session bindings through create and update", 
         session: "qube_cx_j10ra-github-io_3",
         sessionLabel: "codex · gpt-5.6-sol",
         worktreeId: 73088148,
+        dryRun: false,
         reviewedUpdatedAt: createdResponse.routine.updatedAt,
       },
       { id: String(createdResponse.routine.id) },
@@ -170,6 +179,7 @@ test("panel routes persist routine session bindings through create and update", 
     assert.equal(updatedResponse.routine.session, "qube_cx_j10ra-github-io_3");
     assert.equal(updatedResponse.routine.sessionLabel, "codex · gpt-5.6-sol");
     assert.equal(updatedResponse.routine.worktreeId, 73088148);
+    assert.equal(updatedResponse.routine.dryRun, false);
 
     const db = openMailarrDatabase(dataDir);
     try {
@@ -178,6 +188,7 @@ test("panel routes persist routine session bindings through create and update", 
       assert.equal(persisted.session, "qube_cx_j10ra-github-io_3");
       assert.equal(persisted.sessionLabel, "codex · gpt-5.6-sol");
       assert.equal(persisted.worktreeId, 73088148);
+      assert.equal(persisted.dryRun, false);
     } finally {
       db.close();
     }
@@ -1137,6 +1148,22 @@ test("agent routine writes exclude panel-only fields and fail while frozen", asy
       assert.equal(dryRunAttempt.isError, true);
       assert.equal(getRoutine(db, panelOnlyRoutine.id).dryRun, true);
     }, dataDir);
+  });
+});
+
+test("routine content updates cannot change panel-only dry-run mode", () => {
+  withDatabase((db) => {
+    const routine = createTestRoutine(db, {
+      name: "Structurally guarded dry run",
+    });
+
+    const updated = updateRoutineContent(db, routine.id, {
+      orderText: "Updated content only.",
+      dryRun: false,
+    } as Parameters<typeof updateRoutineContent>[2] & { dryRun: boolean });
+
+    assert.equal(updated.orderText, "Updated content only.");
+    assert.equal(updated.dryRun, true);
   });
 });
 
